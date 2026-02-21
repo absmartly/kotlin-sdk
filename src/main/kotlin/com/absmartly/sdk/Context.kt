@@ -1,0 +1,523 @@
+package com.absmartly.sdk
+
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+
+class Context(
+    private var data: ContextData,
+    private val units: MutableMap<String, String>,
+    private val options: ContextOptions,
+    private val eventLogger: ContextEventLogger? = null,
+    private val startReady: Boolean = true
+) {
+    private val objectMapper = jacksonObjectMapper()
+    private val assignmentCache = ConcurrentHashMap<String, Assignment>()
+    private val overrides = ConcurrentHashMap<String, Int>()
+    private val cassignments = ConcurrentHashMap<String, Int>()
+    private val attributes_ = mutableListOf<Attribute>()
+    private val exposures_ = ConcurrentLinkedQueue<Exposure>()
+    private val achievements_ = ConcurrentLinkedQueue<GoalAchievement>()
+    private val hashedUnits_ = ConcurrentHashMap<String, ByteArray>()
+    private val assigners_ = ConcurrentHashMap<String, VariantAssigner>()
+
+    private val audienceMatcher = AudienceMatcher()
+
+    private var index_ = mutableMapOf<String, ContextExperiment>()
+    private var indexVariables_ = mutableMapOf<String, MutableList<ContextExperiment>>()
+
+    @Volatile private var ready_ = false
+    @Volatile private var failed_ = false
+    @Volatile private var closed_ = false
+    @Volatile private var closing_ = false
+
+    private val attrsSeq_ = AtomicInteger(0)
+    private val pendingCount_ = AtomicInteger(0)
+
+    private class Assignment {
+        var id: Int = 0
+        var iteration: Int = 0
+        var fullOnVariant: Int = 0
+        var name: String = ""
+        var unitType: String? = null
+        var trafficSplit: DoubleArray = doubleArrayOf()
+        var variant: Int = 0
+        var assigned: Boolean = false
+        var overridden: Boolean = false
+        var eligible: Boolean = true
+        var fullOn: Boolean = false
+        var custom: Boolean = false
+        var audienceMismatch: Boolean = false
+        var variables: Map<String, Any?>? = null
+        var attrsSeq: Int = 0
+        val exposed: AtomicBoolean = AtomicBoolean(false)
+    }
+
+    private class ContextExperiment(
+        val data: Experiment,
+        val variables: List<Map<String, Any?>>
+    )
+
+    init {
+        if (startReady) {
+            setData(data)
+            ready_ = true
+        }
+    }
+
+    val isReady: Boolean get() = ready_
+    val isFailed: Boolean get() = failed_
+    val isClosed: Boolean get() = closed_
+
+    val pendingCount: Int get() = pendingCount_.get()
+
+    val experiments: List<String>
+        get() {
+            checkReady(true)
+            return data.experiments.map { it.name }
+        }
+
+    val variableKeys: Map<String, List<String>>
+        get() {
+            checkReady(true)
+            val result = mutableMapOf<String, List<String>>()
+            for ((key, exps) in indexVariables_) {
+                result[key] = exps.map { it.data.name }
+            }
+            return result
+        }
+
+    val customFieldKeys: Set<String>
+        get() {
+            val keys = mutableSetOf<String>()
+            for (experiment in data.experiments) {
+                experiment.customFieldValues?.forEach { keys.add(it.name) }
+            }
+            return keys
+        }
+
+    fun setUnit(unitType: String, uid: String) {
+        checkNotClosed()
+        val uidStr = uid.trim()
+        val previous = units[unitType]
+        if (previous != null && previous != uidStr) {
+            throw IllegalArgumentException("Unit '$unitType' already set.")
+        }
+        if (uidStr.isEmpty()) {
+            throw IllegalArgumentException("Unit '$unitType' UID must not be blank.")
+        }
+        units[unitType] = uidStr
+    }
+
+    fun getUnit(unitType: String): String? = units[unitType]
+
+    fun setAttribute(name: String, value: Any?) {
+        checkNotClosed()
+        synchronized(attributes_) {
+            attributes_.add(Attribute(name, value, System.currentTimeMillis()))
+        }
+        attrsSeq_.incrementAndGet()
+    }
+
+    fun getAttribute(name: String): Any? {
+        synchronized(attributes_) {
+            for (i in attributes_.indices.reversed()) {
+                if (attributes_[i].name == name) return attributes_[i].value
+            }
+        }
+        return null
+    }
+
+    fun setOverride(experimentName: String, variant: Int) {
+        checkNotClosed()
+        overrides[experimentName] = variant
+    }
+
+    fun setCustomAssignment(experimentName: String, variant: Int) {
+        checkNotClosed()
+        cassignments[experimentName] = variant
+    }
+
+    fun getTreatment(experimentName: String): Int {
+        checkReady(true)
+        val assignment = getAssignment(experimentName)
+        if (!assignment.exposed.get()) {
+            queueExposure(assignment)
+        }
+        return assignment.variant
+    }
+
+    fun peekTreatment(experimentName: String): Int {
+        checkReady(true)
+        return getAssignment(experimentName).variant
+    }
+
+    fun getVariableValue(key: String, defaultValue: Any?): Any? {
+        checkReady(true)
+        val assignment = getVariableAssignment(key)
+        if (assignment != null && assignment.variables != null) {
+            if (!assignment.exposed.get()) {
+                queueExposure(assignment)
+            }
+            if (assignment.variables!!.containsKey(key)) {
+                return assignment.variables!![key]
+            }
+        }
+        return defaultValue
+    }
+
+    fun peekVariableValue(key: String, defaultValue: Any?): Any? {
+        checkReady(true)
+        val assignment = getVariableAssignment(key)
+        if (assignment != null && assignment.variables != null) {
+            if (assignment.variables!!.containsKey(key)) {
+                return assignment.variables!![key]
+            }
+        }
+        return defaultValue
+    }
+
+    fun getCustomFieldValue(experimentName: String, key: String): Any? {
+        val experiment = index_[experimentName] ?: return null
+        val field = experiment.data.customFieldValues?.find { it.name == key } ?: return null
+        if (field.value == null) return null
+
+        return when {
+            field.type != null && field.type!!.startsWith("json") -> {
+                try {
+                    objectMapper.readValue(field.value, Any::class.java)
+                } catch (e: Exception) {
+                    field.value
+                }
+            }
+            field.type == "boolean" -> field.value.toBoolean()
+            field.type == "number" -> {
+                try {
+                    field.value!!.toDouble()
+                } catch (e: NumberFormatException) {
+                    field.value
+                }
+            }
+            else -> field.value
+        }
+    }
+
+    fun getCustomFieldValueType(experimentName: String, key: String): String? {
+        val experiment = index_[experimentName] ?: return null
+        val field = experiment.data.customFieldValues?.find { it.name == key } ?: return null
+        return field.type
+    }
+
+    fun track(goalName: String, properties: Map<String, Any?>?) {
+        checkNotClosed()
+        val achievement = GoalAchievement(
+            name = goalName,
+            achievedAt = System.currentTimeMillis(),
+            properties = properties?.let { java.util.TreeMap(it) }
+        )
+        achievements_.add(achievement)
+        pendingCount_.incrementAndGet()
+        logEvent(ContextEventLogger.EventType.Goal, achievement)
+    }
+
+    fun publish() {
+        checkNotClosed()
+        flush()
+    }
+
+    fun close() {
+        if (!closed_ && !closing_) {
+            closing_ = true
+            if (pendingCount_.get() > 0) {
+                flush()
+            }
+            closed_ = true
+            closing_ = false
+            logEvent(ContextEventLogger.EventType.Close, null)
+        }
+    }
+
+    fun setDataAndReady(newData: ContextData) {
+        setData(newData)
+        ready_ = true
+        logEvent(ContextEventLogger.EventType.Ready, newData)
+    }
+
+    fun refresh(newData: ContextData) {
+        assignmentCache.clear()
+        setData(newData)
+        logEvent(ContextEventLogger.EventType.Refresh, newData)
+    }
+
+    internal fun setData(data: ContextData) {
+        this.data = data
+        val newIndex = mutableMapOf<String, ContextExperiment>()
+        val newVarIndex = mutableMapOf<String, MutableList<ContextExperiment>>()
+
+        for (experiment in data.experiments) {
+            val variantVariables = mutableListOf<Map<String, Any?>>()
+            for (variant in experiment.variants) {
+                if (variant.config != null && variant.config!!.isNotEmpty()) {
+                    try {
+                        @Suppress("UNCHECKED_CAST")
+                        val vars = objectMapper.readValue(variant.config, Map::class.java) as Map<String, Any?>
+                        variantVariables.add(vars)
+
+                        for (key in vars.keys) {
+                            val list = newVarIndex.getOrPut(key) { mutableListOf() }
+                            val indexed = ContextExperiment(experiment, variantVariables)
+                            val existing = list.find { it.data.name == experiment.name }
+                            if (existing == null) {
+                                val insertAt = list.indexOfFirst { it.data.id > experiment.id }
+                                if (insertAt < 0) list.add(indexed) else list.add(insertAt, indexed)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        variantVariables.add(emptyMap())
+                    }
+                } else {
+                    variantVariables.add(emptyMap())
+                }
+            }
+            newIndex[experiment.name] = ContextExperiment(experiment, variantVariables)
+        }
+
+        index_ = newIndex
+        indexVariables_ = newVarIndex
+    }
+
+    private fun getAssignment(experimentName: String): Assignment {
+        val cached = assignmentCache[experimentName]
+
+        if (cached != null) {
+            val custom = cassignments[experimentName]
+            val override = overrides[experimentName]
+            val experiment = index_[experimentName]
+
+            if (override != null) {
+                if (cached.overridden && cached.variant == override) {
+                    return cached
+                }
+            } else if (experiment == null) {
+                if (!cached.assigned) {
+                    return cached
+                }
+            } else if (custom == null || custom == cached.variant) {
+                if (experimentMatches(experiment.data, cached) && audienceMatches(experiment.data, cached)) {
+                    return cached
+                }
+            }
+        }
+
+        val custom = cassignments[experimentName]
+        val override = overrides[experimentName]
+        val experiment = index_[experimentName]
+
+        val assignment = Assignment()
+        assignment.name = experimentName
+        assignment.eligible = true
+
+        if (override != null) {
+            if (experiment != null) {
+                assignment.id = experiment.data.id
+                assignment.unitType = experiment.data.unitType
+            }
+            assignment.overridden = true
+            assignment.variant = override
+        } else {
+            if (experiment != null) {
+                val unitType = experiment.data.unitType
+
+                if (experiment.data.audience != null && experiment.data.audience!!.isNotEmpty()) {
+                    val attrs = buildAttributesMap()
+                    val match = audienceMatcher.evaluate(experiment.data.audience!!, attrs)
+                    if (match != null) {
+                        assignment.audienceMismatch = !match.value
+                    }
+                }
+
+                if (experiment.data.audienceStrict && assignment.audienceMismatch) {
+                    assignment.variant = 0
+                } else if (experiment.data.fullOnVariant == 0) {
+                    val uid = units[experiment.data.unitType]
+                    if (uid != null) {
+                        val unitHash = getUnitHash(unitType!!, uid)
+                        val assigner = getVariantAssigner(unitType, unitHash)
+                        val eligible = assigner.assign(
+                            experiment.data.trafficSplit,
+                            experiment.data.trafficSeedHi,
+                            experiment.data.trafficSeedLo
+                        ) == 1
+                        if (eligible) {
+                            if (custom != null) {
+                                assignment.variant = custom
+                                assignment.custom = true
+                            } else {
+                                assignment.variant = assigner.assign(
+                                    experiment.data.split,
+                                    experiment.data.seedHi,
+                                    experiment.data.seedLo
+                                )
+                            }
+                        } else {
+                            assignment.eligible = false
+                            assignment.variant = 0
+                        }
+                        assignment.assigned = true
+                    }
+                } else {
+                    assignment.assigned = true
+                    assignment.variant = experiment.data.fullOnVariant
+                    assignment.fullOn = true
+                }
+
+                assignment.unitType = unitType
+                assignment.id = experiment.data.id
+                assignment.iteration = experiment.data.iteration
+                assignment.trafficSplit = experiment.data.trafficSplit
+                assignment.fullOnVariant = experiment.data.fullOnVariant
+                assignment.attrsSeq = attrsSeq_.get()
+            }
+        }
+
+        if (experiment != null && assignment.variant >= 0 && assignment.variant < experiment.data.variants.size) {
+            if (assignment.variant < experiment.variables.size) {
+                assignment.variables = experiment.variables[assignment.variant]
+            }
+        }
+
+        assignmentCache[experimentName] = assignment
+        return assignment
+    }
+
+    private fun getVariableAssignment(key: String): Assignment? {
+        val keyExperiments = indexVariables_[key] ?: return null
+        for (experiment in keyExperiments) {
+            val assignment = getAssignment(experiment.data.name)
+            if (assignment.assigned || assignment.overridden) {
+                return assignment
+            }
+        }
+        return null
+    }
+
+    private fun experimentMatches(experiment: Experiment, assignment: Assignment): Boolean {
+        return experiment.id == assignment.id &&
+                experiment.unitType != null && experiment.unitType == assignment.unitType &&
+                experiment.iteration == assignment.iteration &&
+                experiment.fullOnVariant == assignment.fullOnVariant &&
+                experiment.trafficSplit.contentEquals(assignment.trafficSplit)
+    }
+
+    private fun audienceMatches(experiment: Experiment, assignment: Assignment): Boolean {
+        if (experiment.audience != null && experiment.audience!!.isNotEmpty()) {
+            if (attrsSeq_.get() > assignment.attrsSeq) {
+                val attrs = buildAttributesMap()
+                val match = audienceMatcher.evaluate(experiment.audience!!, attrs)
+                val newAudienceMismatch = if (match != null) !match.value else false
+                if (newAudienceMismatch != assignment.audienceMismatch) {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    private fun queueExposure(assignment: Assignment) {
+        if (assignment.exposed.compareAndSet(false, true)) {
+            val exposure = Exposure(
+                id = assignment.id,
+                name = assignment.name,
+                unit = assignment.unitType,
+                variant = assignment.variant,
+                exposedAt = System.currentTimeMillis(),
+                assigned = assignment.assigned,
+                eligible = assignment.eligible,
+                overridden = assignment.overridden,
+                fullOn = assignment.fullOn,
+                custom = assignment.custom,
+                audienceMismatch = assignment.audienceMismatch
+            )
+            exposures_.add(exposure)
+            pendingCount_.incrementAndGet()
+            logEvent(ContextEventLogger.EventType.Exposure, exposure)
+        }
+    }
+
+    private fun flush() {
+        if (pendingCount_.get() > 0) {
+            val exposureList = mutableListOf<Exposure>()
+            val goalList = mutableListOf<GoalAchievement>()
+
+            while (true) {
+                val e = exposures_.poll() ?: break
+                exposureList.add(e)
+            }
+            while (true) {
+                val g = achievements_.poll() ?: break
+                goalList.add(g)
+            }
+            pendingCount_.set(0)
+
+            val unitList = units.map { (type, uid) ->
+                Unit(type, String(getUnitHash(type, uid), Charsets.US_ASCII))
+            }
+
+            val attrList = synchronized(attributes_) {
+                if (attributes_.isEmpty()) null else attributes_.toList()
+            }
+
+            val event = PublishEvent(
+                hashed = true,
+                publishedAt = System.currentTimeMillis(),
+                units = unitList,
+                exposures = exposureList.ifEmpty { null },
+                goals = goalList.ifEmpty { null },
+                attributes = attrList
+            )
+
+            logEvent(ContextEventLogger.EventType.Publish, event)
+        }
+    }
+
+    private fun getUnitHash(unitType: String, uid: String): ByteArray {
+        return hashedUnits_.computeIfAbsent(unitType) {
+            Hashing.hashUnit(uid)
+        }
+    }
+
+    private fun getVariantAssigner(unitType: String, unitHash: ByteArray): VariantAssigner {
+        return assigners_.computeIfAbsent(unitType) {
+            VariantAssigner(unitHash)
+        }
+    }
+
+    private fun buildAttributesMap(): Map<String, Any?> {
+        val result = mutableMapOf<String, Any?>()
+        synchronized(attributes_) {
+            for (attr in attributes_) {
+                result[attr.name] = attr.value
+            }
+        }
+        return result
+    }
+
+    private fun logEvent(type: ContextEventLogger.EventType, data: Any?) {
+        try {
+            eventLogger?.handleEvent(this, type, data)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun checkReady(expectNotClosed: Boolean) {
+        if (!ready_) throw IllegalStateException("ABSmartly Context is not yet ready")
+        if (expectNotClosed) checkNotClosed()
+    }
+
+    private fun checkNotClosed() {
+        if (closed_) throw IllegalStateException("ABSmartly Context is closed")
+        if (closing_) throw IllegalStateException("ABSmartly Context is closing")
+    }
+}
