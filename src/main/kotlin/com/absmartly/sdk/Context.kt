@@ -517,7 +517,7 @@ class Context(
     }
 
     private fun checkNotClosed() {
-        if (closed_) throw IllegalStateException("ABSmartly Context is closed")
+        if (closed_) throw IllegalStateException("ABSmartly Context is finalized")
         if (closing_) throw IllegalStateException("ABSmartly Context is closing")
     }
 }

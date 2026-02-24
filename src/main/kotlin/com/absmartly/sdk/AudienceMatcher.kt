@@ -96,12 +96,12 @@ internal object JsonExpr {
             "lte" -> binaryOp(args, vars) { a, b -> val c = compare(a, b); c != null && c <= 0 }
             "in" -> {
                 if (args is List<*> && args.size == 2) {
-                    val haystack = evaluate(args[0], vars)
-                    val needle = evaluate(args[1], vars)
-                    if (haystack is String && needle is String) {
-                        haystack.contains(needle)
-                    } else if (haystack is List<*>) {
+                    val needle = evaluate(args[0], vars)
+                    val haystack = evaluate(args[1], vars)
+                    if (haystack is List<*>) {
                         haystack.any { compare(it, needle) == 0 }
+                    } else if (haystack is String && needle is String) {
+                        haystack.contains(needle)
                     } else {
                         null
                     }
