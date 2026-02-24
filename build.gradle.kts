@@ -32,6 +32,15 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    testLogging {
+        showStandardStreams = false
+        events("passed", "failed", "skipped")
+        afterSuite(KotlinClosure2<TestDescriptor, TestResult, Unit>({ desc, result ->
+            if (desc.parent == null) {
+                println("\n${result.successfulTestCount} tests completed, ${result.failedTestCount} failed")
+            }
+        }))
+    }
 }
 
 java {
