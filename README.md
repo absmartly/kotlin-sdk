@@ -55,40 +55,78 @@ Please follow the [installation](#installation) instructions before trying the f
 
 This example assumes an Api Key, an Application, and an Environment have been created in the A/B Smartly web console.
 
-#### Recommended: Direct Construction
+#### Recommended: Using the SDK Wrapper
+
+The recommended approach uses the `ABsmartly` wrapper which handles HTTP communication, data fetching, and event publishing automatically.
 
 ```kotlin
 import com.absmartly.sdk.*
 
 fun main() {
-    // Fetch context data from the A/B Smartly collector API
-    // (HTTP request to https://your-company.absmartly.io/v1/context)
-    val contextData: ContextData = fetchContextData()
+    val clientConfig = ClientConfig.create()
+        .setEndpoint("https://your-company.absmartly.io/v1")
+        .setAPIKey("YOUR_API_KEY")
+        .setApplication("website")
+        .setEnvironment("production")
 
-    val units = mutableMapOf("session_id" to "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
-    val options = ContextOptions(publishDelay = -1, refreshPeriod = 0)
+    val client = Client.create(clientConfig)
 
-    val context = Context(
-        data = contextData,
-        units = units,
-        options = options,
-    )
+    val sdkConfig = ABSmartlyConfig.create()
+        .setClient(client)
 
-    // context is ready to use
+    val sdk = ABsmartly.create(sdkConfig)
+
+    val contextConfig = ContextConfig.create()
+        .setUnit("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
+
+    val context = sdk.createContext(contextConfig)
+        .waitUntilReady()
+
+    val treatment = context.getTreatment("exp_test_experiment")
+
+    context.close()
+    sdk.close()
 }
 ```
 
-#### With Optional Parameters
+#### With Pre-fetched Data
+
+If you already have the context data, you can create a context without an additional HTTP request:
 
 ```kotlin
-val options = ContextOptions(
-    publishDelay = 100,   // delay before publishing in milliseconds
-    refreshPeriod = 0,    // auto-refresh period (0 = disabled)
-)
+val contextData = sdk.getContextData().get()
+
+val contextConfig = ContextConfig.create()
+    .setUnit("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
+
+val context = sdk.createContextWith(contextConfig, contextData)
+```
+
+#### Async Context Creation
+
+The `createContext()` method starts fetching data asynchronously. You can use the context after calling `waitUntilReady()` or `waitUntilReadyAsync()`:
+
+```kotlin
+val context = sdk.createContext(contextConfig)
+
+context.waitUntilReadyAsync().thenAccept { ctx ->
+    val treatment = ctx.getTreatment("exp_test_experiment")
+}
+```
+
+#### Direct Construction
+
+For simpler use cases where you manage data fetching yourself:
+
+```kotlin
+val contextData: ContextData = fetchContextData()
+
+val units = mutableMapOf("session_id" to "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
+val options = ContextOptions(publishDelay = -1, refreshPeriod = 0)
 
 val context = Context(
     data = contextData,
-    units = mutableMapOf("session_id" to "5ebf06d8cb5d8137290c4abb64155584fbdb64d8"),
+    units = units,
     options = options,
 )
 ```
@@ -117,36 +155,74 @@ val eventLogger = object : ContextEventLogger {
     }
 }
 
-val context = Context(
-    data = contextData,
-    units = mutableMapOf("session_id" to "5ebf06d8cb5d8137290c4abb64155584fbdb64d8"),
-    options = options,
-    eventLogger = eventLogger,
-)
+val sdkConfig = ABSmartlyConfig.create()
+    .setClient(client)
+    .setContextEventLogger(eventLogger)
+
+val sdk = ABsmartly.create(sdkConfig)
 ```
 
-**SDK Options (ContextOptions)**
+**ClientConfig Parameters**
 
-| Config         | Type     | Required? |   Default   | Description                                                                                                      |
-| :------------- | :------- | :-------: | :---------: | :--------------------------------------------------------------------------------------------------------------- |
-| publishDelay   | `Long`   |  &#10060; | `-1`        | Delay in milliseconds before publishing events. Use `-1` to publish immediately.                                  |
-| refreshPeriod  | `Long`   |  &#10060; | `0`         | Period in milliseconds for automatic context refresh. Use `0` to disable.                                         |
+| Config      | Type                         | Required? | Description                                                       |
+| :---------- | :--------------------------- | :-------: | :---------------------------------------------------------------- |
+| endpoint    | `String`                     |  &#9989;  | The A/B Smartly collector endpoint URL (must use https://)         |
+| apiKey      | `String`                     |  &#9989;  | Your API key from the A/B Smartly web console                     |
+| application | `String`                     |  &#9989;  | The application name as configured in the web console              |
+| environment | `String`                     |  &#9989;  | The environment name as configured in the web console              |
+| deserializer| `ContextDataDeserializer?`   |  &#10060; | Custom context data deserializer (defaults to Jackson-based)       |
+| serializer  | `ContextEventSerializer?`    |  &#10060; | Custom event serializer (defaults to Jackson-based)                |
+| executor    | `Executor?`                  |  &#10060; | Custom executor for async operations                               |
 
-**Context Constructor Parameters**
+**ContextConfig Parameters**
 
-| Parameter    | Type                              | Required? |   Default   | Description                                                                                                                                                                   |
-| :----------- | :-------------------------------- | :-------: | :---------: | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| data         | `ContextData`                     |  &#9989;  | -           | The context data obtained from the A/B Smartly collector API.                                                                                                                 |
-| units        | `MutableMap<String, String>`      |  &#9989;  | -           | A map of unit types to unit identifiers (e.g., `mutableMapOf("session_id" to "abc123")`).                                                                                     |
-| options      | `ContextOptions`                  |  &#9989;  | -           | Configuration options for publish delay and refresh period.                                                                                                                    |
-| eventLogger  | `ContextEventLogger?`             |  &#10060; | `null`      | Custom event logger to handle SDK events (exposure, goal, etc.)                                                                                                               |
-| startReady   | `Boolean`                         |  &#10060; | `true`      | Whether the context should be immediately ready. Set to `false` for deferred initialization.                                                                                  |
+| Method               | Description                                                   |
+| :------------------- | :------------------------------------------------------------ |
+| `setUnit(type, uid)` | Set a unit type and identifier                                |
+| `setOverride(name, variant)` | Force a specific variant for an experiment              |
+| `setCustomAssignment(name, variant)` | Set a custom assignment for an experiment      |
+| `setEventLogger(logger)` | Set a context-level event logger                          |
+| `setPublishDelay(ms)` | Set the publish delay in milliseconds (default: 100)         |
+| `setRefreshInterval(ms)` | Set the refresh interval in milliseconds (default: 0)    |
 
 ## Creating a New Context
 
-### Synchronously
+### Using ABsmartly SDK Wrapper (Recommended)
 
 ```kotlin
+val contextConfig = ContextConfig.create()
+    .setUnit("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
+
+val context = sdk.createContext(contextConfig)
+    .waitUntilReady()
+
+assert(context.isReady)
+```
+
+### With Pre-fetched Data
+
+Creating a context involves obtaining data from the A/B Smartly event collector. You can avoid repeating the round-trip by re-using previously retrieved data:
+
+```kotlin
+val contextData = sdk.getContextData().get()
+
+val context = sdk.createContextWith(
+    ContextConfig.create().setUnit("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8"),
+    contextData
+)
+
+val anotherContext = sdk.createContextWith(
+    ContextConfig.create().setUnit("session_id", "another-session-id"),
+    contextData
+)
+
+assert(anotherContext.isReady)
+```
+
+### Direct Construction (Manual Data Fetching)
+
+```kotlin
+val contextData: ContextData = fetchContextData()
 val units = mutableMapOf("session_id" to "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
 val options = ContextOptions()
 
@@ -159,49 +235,17 @@ val context = Context(
 assert(context.isReady)
 ```
 
-### With Pre-fetched Data
-
-Creating a context involves obtaining data from the A/B Smartly event collector. You can avoid repeating the round-trip by re-using previously retrieved data:
-
-```kotlin
-val context = Context(
-    data = contextData,
-    units = mutableMapOf("session_id" to "5ebf06d8cb5d8137290c4abb64155584fbdb64d8"),
-    options = ContextOptions(),
-)
-
-// Reuse context data for another context with different units
-val anotherContext = Context(
-    data = contextData, // same data, no additional HTTP request
-    units = mutableMapOf("session_id" to "another-session-id"),
-    options = ContextOptions(),
-)
-
-assert(anotherContext.isReady)
-```
-
-### Deferred Initialization
-
-You can create a context in a not-ready state and set the data later:
-
-```kotlin
-val context = Context(
-    data = ContextData(),
-    units = mutableMapOf("session_id" to "abc123"),
-    options = ContextOptions(),
-    startReady = false,
-)
-
-assert(!context.isReady)
-
-// Later, when data is available:
-context.setDataAndReady(contextData)
-assert(context.isReady)
-```
-
 ### Refreshing the Context with Fresh Experiment Data
 
-For long-running contexts, experiments started after the context was created will not be triggered. Call the `refresh()` method with updated data to incorporate new experiments. The `refresh()` method clears all cached assignments and rebuilds the internal index.
+For long-running contexts, experiments started after the context was created will not be triggered.
+
+When using the SDK wrapper, call `refresh()` without arguments to automatically fetch fresh data:
+
+```kotlin
+context.refresh().get()
+```
+
+When using direct construction, pass the new data explicitly:
 
 ```kotlin
 val freshData: ContextData = fetchFreshContextData()

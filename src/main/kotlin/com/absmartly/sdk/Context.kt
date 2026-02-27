@@ -1,18 +1,106 @@
 package com.absmartly.sdk
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import java.io.Closeable
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
-class Context(
-    private var data: ContextData,
+class Context private constructor(
     private val units: MutableMap<String, String>,
-    private val options: ContextOptions,
-    private val eventLogger: ContextEventLogger? = null,
-    private val startReady: Boolean = true
-) {
+    private val eventLogger: ContextEventLogger?,
+    private val eventHandler: ContextEventHandler?,
+    private val dataProvider: ContextDataProvider?,
+    private val publishDelay: Long,
+    private val refreshInterval: Long,
+    private val scheduler: ScheduledExecutorService?
+) : Closeable {
+
+    constructor(
+        data: ContextData,
+        units: MutableMap<String, String>,
+        options: ContextOptions,
+        eventLogger: ContextEventLogger? = null,
+        startReady: Boolean = true
+    ) : this(
+        units = units,
+        eventLogger = eventLogger,
+        eventHandler = null,
+        dataProvider = null,
+        publishDelay = options.publishDelay,
+        refreshInterval = options.refreshPeriod,
+        scheduler = null
+    ) {
+        if (startReady) {
+            setData(data)
+            ready_ = true
+        }
+    }
+
+    companion object {
+        private val COMPLETED_VOID_FUTURE: CompletableFuture<Void> = CompletableFuture.completedFuture(null)
+
+        internal fun create(
+            config: ContextConfig,
+            dataFuture: CompletableFuture<ContextData>,
+            dataProvider: ContextDataProvider?,
+            eventHandler: ContextEventHandler?,
+            eventLogger: ContextEventLogger?,
+            scheduler: ScheduledExecutorService?
+        ): Context {
+            val units = mutableMapOf<String, String>()
+            config.getUnits()?.let { units.putAll(it) }
+
+            val configLogger = config.eventLogger ?: eventLogger
+
+            val context = Context(
+                units = units,
+                eventLogger = configLogger,
+                eventHandler = eventHandler,
+                dataProvider = dataProvider,
+                publishDelay = config.publishDelay,
+                refreshInterval = config.refreshInterval,
+                scheduler = scheduler
+            )
+
+            config.getOverrides()?.forEach { (k, v) -> context.overrides[k] = v }
+            config.getCustomAssignments()?.forEach { (k, v) -> context.cassignments[k] = v }
+            config.getAttributes()?.forEach { (k, v) ->
+                context.setAttribute(k, v)
+            }
+
+            if (dataFuture.isDone) {
+                dataFuture.thenAccept { data ->
+                    context.setData(data)
+                    context.logEvent(ContextEventLogger.EventType.Ready, data)
+                }.exceptionally { exception ->
+                    context.setDataFailed(exception)
+                    null
+                }
+            } else {
+                val readyFuture = CompletableFuture<Void>()
+                context.readyFuture_.set(readyFuture)
+                dataFuture.thenAccept { data ->
+                    context.setData(data)
+                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                    rf?.complete(null)
+                    context.logEvent(ContextEventLogger.EventType.Ready, data)
+                }.exceptionally { exception ->
+                    context.setDataFailed(exception)
+                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                    rf?.complete(null)
+                    null
+                }
+            }
+
+            return context
+        }
+    }
+
     private val objectMapper = jacksonObjectMapper()
     private val assignmentCache = ConcurrentHashMap<String, Assignment>()
     private val overrides = ConcurrentHashMap<String, Int>()
@@ -25,6 +113,7 @@ class Context(
 
     private val audienceMatcher = AudienceMatcher()
 
+    private var data: ContextData = ContextData()
     private var index_ = mutableMapOf<String, ContextExperiment>()
     private var indexVariables_ = mutableMapOf<String, MutableList<ContextExperiment>>()
 
@@ -35,6 +124,8 @@ class Context(
 
     private val attrsSeq_ = AtomicInteger(0)
     private val pendingCount_ = AtomicInteger(0)
+
+    private val readyFuture_ = AtomicReference<CompletableFuture<Void>?>(null)
 
     private class Assignment {
         var id: Int = 0
@@ -60,18 +151,33 @@ class Context(
         val variables: List<Map<String, Any?>>
     )
 
-    init {
-        if (startReady) {
-            setData(data)
-            ready_ = true
-        }
-    }
-
     val isReady: Boolean get() = ready_
     val isFailed: Boolean get() = failed_
     val isClosed: Boolean get() = closed_
 
     val pendingCount: Int get() = pendingCount_.get()
+
+    fun waitUntilReady(): Context {
+        if (!ready_) {
+            val future = readyFuture_.get()
+            if (future != null && !future.isDone) {
+                future.join()
+            }
+        }
+        return this
+    }
+
+    fun waitUntilReadyAsync(): CompletableFuture<Context> {
+        if (ready_) {
+            return CompletableFuture.completedFuture(this)
+        }
+        val rf = readyFuture_.get()
+        return if (rf != null) {
+            rf.thenApply { this }
+        } else {
+            CompletableFuture.completedFuture(this)
+        }
+    }
 
     val experiments: List<String>
         get() {
@@ -222,16 +328,16 @@ class Context(
         logEvent(ContextEventLogger.EventType.Goal, achievement)
     }
 
-    fun publish() {
+    fun publish(): CompletableFuture<Void> {
         checkNotClosed()
-        flush()
+        return flush()
     }
 
-    fun close() {
+    override fun close() {
         if (!closed_ && !closing_) {
             closing_ = true
             if (pendingCount_.get() > 0) {
-                flush()
+                flush().join()
             }
             closed_ = true
             closing_ = false
@@ -243,6 +349,17 @@ class Context(
         setData(newData)
         ready_ = true
         logEvent(ContextEventLogger.EventType.Ready, newData)
+    }
+
+    fun refresh(): CompletableFuture<Void> {
+        if (dataProvider == null) {
+            return CompletableFuture.completedFuture(null)
+        }
+        return dataProvider.getContextData().thenAccept { newData ->
+            assignmentCache.clear()
+            setData(newData)
+            logEvent(ContextEventLogger.EventType.Refresh, newData)
+        }
     }
 
     fun refresh(newData: ContextData) {
@@ -286,6 +403,13 @@ class Context(
 
         index_ = newIndex
         indexVariables_ = newVarIndex
+        ready_ = true
+    }
+
+    private fun setDataFailed(exception: Throwable) {
+        failed_ = true
+        ready_ = true
+        logEvent(ContextEventLogger.EventType.Error, exception)
     }
 
     private fun getAssignment(experimentName: String): Assignment {
@@ -446,40 +570,51 @@ class Context(
         }
     }
 
-    private fun flush() {
-        if (pendingCount_.get() > 0) {
-            val exposureList = mutableListOf<Exposure>()
-            val goalList = mutableListOf<GoalAchievement>()
-
-            while (true) {
-                val e = exposures_.poll() ?: break
-                exposureList.add(e)
-            }
-            while (true) {
-                val g = achievements_.poll() ?: break
-                goalList.add(g)
-            }
-            pendingCount_.set(0)
-
-            val unitList = units.map { (type, uid) ->
-                Unit(type, String(getUnitHash(type, uid), Charsets.US_ASCII))
-            }
-
-            val attrList = synchronized(attributes_) {
-                if (attributes_.isEmpty()) null else attributes_.toList()
-            }
-
-            val event = PublishEvent(
-                hashed = true,
-                publishedAt = System.currentTimeMillis(),
-                units = unitList,
-                exposures = exposureList.ifEmpty { null },
-                goals = goalList.ifEmpty { null },
-                attributes = attrList
-            )
-
-            logEvent(ContextEventLogger.EventType.Publish, event)
+    private fun flush(): CompletableFuture<Void> {
+        if (pendingCount_.get() <= 0) {
+            return CompletableFuture.completedFuture(null)
         }
+
+        val exposureList = mutableListOf<Exposure>()
+        val goalList = mutableListOf<GoalAchievement>()
+
+        while (true) {
+            val e = exposures_.poll() ?: break
+            exposureList.add(e)
+        }
+        while (true) {
+            val g = achievements_.poll() ?: break
+            goalList.add(g)
+        }
+        pendingCount_.set(0)
+
+        val unitList = units.map { (type, uid) ->
+            com.absmartly.sdk.Unit(type, String(getUnitHash(type, uid), Charsets.US_ASCII))
+        }
+
+        val attrList = synchronized(attributes_) {
+            if (attributes_.isEmpty()) null else attributes_.toList()
+        }
+
+        val event = PublishEvent(
+            hashed = true,
+            publishedAt = System.currentTimeMillis(),
+            units = unitList,
+            exposures = exposureList.ifEmpty { null },
+            goals = goalList.ifEmpty { null },
+            attributes = attrList
+        )
+
+        logEvent(ContextEventLogger.EventType.Publish, event)
+
+        if (eventHandler != null) {
+            return eventHandler.publish(this, event).exceptionally { exception ->
+                logEvent(ContextEventLogger.EventType.Error, exception)
+                null
+            }
+        }
+
+        return CompletableFuture.completedFuture(null)
     }
 
     private fun getUnitHash(unitType: String, uid: String): ByteArray {
