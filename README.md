@@ -55,9 +55,33 @@ Please follow the [installation](#installation) instructions before trying the f
 
 This example assumes an Api Key, an Application, and an Environment have been created in the A/B Smartly web console.
 
-#### Recommended: Using the SDK Wrapper
+#### Recommended: Builder Pattern
 
-The recommended approach uses the `ABsmartly` wrapper which handles HTTP communication, data fetching, and event publishing automatically.
+```kotlin
+import com.absmartly.sdk.*
+
+fun main() {
+    val sdk = ABsmartly.builder()
+        .endpoint("https://your-company.absmartly.io/v1")
+        .apiKey("YOUR_API_KEY")
+        .application("website")
+        .environment("production")
+        .build()
+
+    val contextConfig = ContextConfig.create()
+        .setUnit("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
+
+    val context = sdk.createContext(contextConfig)
+        .waitUntilReady()
+
+    val treatment = context.getTreatment("exp_test_experiment")
+
+    context.close()
+    sdk.close()
+}
+```
+
+#### Alternative: Using Configuration Objects
 
 ```kotlin
 import com.absmartly.sdk.*
@@ -76,16 +100,7 @@ fun main() {
 
     val sdk = ABsmartly.create(sdkConfig)
 
-    val contextConfig = ContextConfig.create()
-        .setUnit("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
-
-    val context = sdk.createContext(contextConfig)
-        .waitUntilReady()
-
-    val treatment = context.getTreatment("exp_test_experiment")
-
-    context.close()
-    sdk.close()
+    // ...
 }
 ```
 
@@ -131,35 +146,33 @@ val context = Context(
 )
 ```
 
-#### Advanced Configuration
-
-For advanced use cases where you need to handle SDK events, provide a custom event logger:
+#### With Event Logger
 
 ```kotlin
-val eventLogger = object : ContextEventLogger {
-    override fun handleEvent(context: Context, type: ContextEventLogger.EventType, data: Any?) {
-        when (type) {
-            ContextEventLogger.EventType.Exposure -> {
-                val exposure = data as Exposure
-                println("Exposed to experiment: ${exposure.name}")
+val sdk = ABsmartly.builder()
+    .endpoint("https://your-company.absmartly.io/v1")
+    .apiKey("YOUR_API_KEY")
+    .application("website")
+    .environment("production")
+    .eventLogger(object : ContextEventLogger {
+        override fun handleEvent(context: Context, type: ContextEventLogger.EventType, data: Any?) {
+            when (type) {
+                ContextEventLogger.EventType.Exposure -> {
+                    val exposure = data as Exposure
+                    println("Exposed to experiment: ${exposure.name}")
+                }
+                ContextEventLogger.EventType.Goal -> {
+                    val goal = data as GoalAchievement
+                    println("Goal tracked: ${goal.name}")
+                }
+                ContextEventLogger.EventType.Error -> {
+                    println("Error: $data")
+                }
+                else -> {}
             }
-            ContextEventLogger.EventType.Goal -> {
-                val goal = data as GoalAchievement
-                println("Goal tracked: ${goal.name}")
-            }
-            ContextEventLogger.EventType.Error -> {
-                println("Error: $data")
-            }
-            else -> {}
         }
-    }
-}
-
-val sdkConfig = ABSmartlyConfig.create()
-    .setClient(client)
-    .setContextEventLogger(eventLogger)
-
-val sdk = ABsmartly.create(sdkConfig)
+    })
+    .build()
 ```
 
 **ClientConfig Parameters**
