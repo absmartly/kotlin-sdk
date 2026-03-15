@@ -239,6 +239,20 @@ class ContextTest {
         return Context(data, units, options, eventLogger)
     }
 
+    private fun createContextWithProvider(
+        data: ContextData = createContextData(),
+        refreshData: ContextData,
+        eventLogger: ContextEventLogger? = null
+    ): Context {
+        val provider = object : ContextDataProvider {
+            override fun getContextData(): java.util.concurrent.CompletableFuture<ContextData> =
+                java.util.concurrent.CompletableFuture.completedFuture(refreshData)
+        }
+        val config = ContextConfig.create().setUnits(units)
+        eventLogger?.let { config.setEventLogger(it) }
+        return Context.create(config, java.util.concurrent.CompletableFuture.completedFuture(data), provider, null, eventLogger, null)
+    }
+
     // --- State Tests ---
 
     @Test
@@ -678,25 +692,25 @@ class ContextTest {
 
     @Test
     fun refreshUpdatesData() {
-        val context = createContext()
         val refreshData = createRefreshContextData()
-        context.refresh(refreshData)
+        val context = createContextWithProvider(refreshData = refreshData)
+        context.refresh().get()
         assertEquals(listOf("exp_test_new"), context.experiments)
     }
 
     @Test
     fun refreshClearsOldAssignments() {
-        val context = createContext()
+        val context = createContextWithProvider(refreshData = createRefreshContextData())
         assertEquals(1, context.getTreatment("exp_test_ab"))
-        context.refresh(createRefreshContextData())
+        context.refresh().get()
         assertEquals(0, context.getTreatment("exp_test_ab"))
     }
 
     @Test
     fun refreshNewExperimentTreatment() {
-        val context = createContext()
         val refreshData = createRefreshContextData()
-        context.refresh(refreshData)
+        val context = createContextWithProvider(refreshData = refreshData)
+        context.refresh().get()
         assertEquals(1, context.getTreatment("exp_test_new"))
     }
 
@@ -939,8 +953,8 @@ class ContextTest {
                 events.add(type to data)
             }
         }
-        val context = createContext(eventLogger = logger)
-        context.refresh(createRefreshContextData())
+        val context = createContextWithProvider(refreshData = createRefreshContextData(), eventLogger = logger)
+        context.refresh().get()
         assertTrue(events.any { it.first == ContextEventLogger.EventType.Refresh })
     }
 
