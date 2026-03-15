@@ -119,8 +119,8 @@ class Context private constructor(
 
     @Volatile private var ready_ = false
     @Volatile private var failed_ = false
-    @Volatile private var closed_ = false
-    @Volatile private var closing_ = false
+    private val closed_ = AtomicBoolean(false)
+    private val closing_ = AtomicBoolean(false)
 
     private val attrsSeq_ = AtomicInteger(0)
     private val pendingCount_ = AtomicInteger(0)
@@ -153,7 +153,7 @@ class Context private constructor(
 
     val isReady: Boolean get() = ready_
     val isFailed: Boolean get() = failed_
-    val isClosed: Boolean get() = closed_
+    val isClosed: Boolean get() = closed_.get()
 
     val pendingCount: Int get() = pendingCount_.get()
 
@@ -237,7 +237,6 @@ class Context private constructor(
     }
 
     fun setOverride(experimentName: String, variant: Int) {
-        checkNotClosed()
         overrides[experimentName] = variant
     }
 
@@ -334,14 +333,16 @@ class Context private constructor(
     }
 
     override fun close() {
-        if (!closed_ && !closing_) {
-            closing_ = true
-            if (pendingCount_.get() > 0) {
-                flush().join()
+        if (!closed_.get() && closing_.compareAndSet(false, true)) {
+            try {
+                if (pendingCount_.get() > 0) {
+                    flush().join()
+                }
+                closed_.set(true)
+                logEvent(ContextEventLogger.EventType.Close, null)
+            } finally {
+                closing_.set(false)
             }
-            closed_ = true
-            closing_ = false
-            logEvent(ContextEventLogger.EventType.Close, null)
         }
     }
 
@@ -382,9 +383,9 @@ class Context private constructor(
                         val vars = objectMapper.readValue(variant.config, Map::class.java) as Map<String, Any?>
                         variantVariables.add(vars)
 
+                        val indexed = ContextExperiment(experiment, variantVariables)
                         for (key in vars.keys) {
                             val list = newVarIndex.getOrPut(key) { mutableListOf() }
-                            val indexed = ContextExperiment(experiment, variantVariables)
                             val existing = list.find { it.data.name == experiment.name }
                             if (existing == null) {
                                 val insertAt = list.indexOfFirst { it.data.id > experiment.id }
@@ -586,7 +587,8 @@ class Context private constructor(
             val g = achievements_.poll() ?: break
             goalList.add(g)
         }
-        pendingCount_.set(0)
+        val drained = exposureList.size + goalList.size
+        pendingCount_.addAndGet(-drained)
 
         val unitList = units.map { (type, uid) ->
             com.absmartly.sdk.Unit(type, String(getUnitHash(type, uid), Charsets.US_ASCII))
@@ -609,6 +611,13 @@ class Context private constructor(
 
         if (eventHandler != null) {
             return eventHandler.publish(this, event).exceptionally { exception ->
+                for (exposure in exposureList) {
+                    exposures_.add(exposure)
+                }
+                for (goal in goalList) {
+                    achievements_.add(goal)
+                }
+                pendingCount_.addAndGet(drained)
                 logEvent(ContextEventLogger.EventType.Error, exception)
                 null
             }
@@ -652,7 +661,7 @@ class Context private constructor(
     }
 
     private fun checkNotClosed() {
-        if (closed_) throw IllegalStateException("ABSmartly Context is finalized")
-        if (closing_) throw IllegalStateException("ABSmartly Context is closing")
+        if (closed_.get()) throw IllegalStateException("ABSmartly Context is finalized")
+        if (closing_.get()) throw IllegalStateException("ABSmartly Context is closing")
     }
 }

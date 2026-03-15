@@ -634,12 +634,10 @@ class ContextTest {
     }
 
     @Test
-    fun closedContextThrowsOnSetOverride() {
+    fun closedContextAllowsSetOverride() {
         val context = createContext()
         context.close()
-        assertFailsWith<IllegalStateException> {
-            context.setOverride("exp", 1)
-        }
+        context.setOverride("exp", 1)
     }
 
     @Test
@@ -975,5 +973,44 @@ class ContextTest {
     fun treatmentReturnsZeroWhenUnitTypeMissing() {
         val context = createContext(units = mutableMapOf())
         assertEquals(0, context.getTreatment("exp_test_ab"))
+    }
+
+    // --- Publish error handling ---
+
+    @Test
+    fun publishKeepsEventsPendingOnFailure() {
+        val failure = RuntimeException("PUBLISH_FAILED")
+        val eventHandler = object : ContextEventHandler {
+            override fun publish(context: Context, event: PublishEvent): java.util.concurrent.CompletableFuture<Void> {
+                val future = java.util.concurrent.CompletableFuture<Void>()
+                future.completeExceptionally(failure)
+                return future
+            }
+        }
+
+        val config = ContextConfig.create().setUnits(units)
+        val dataFuture = java.util.concurrent.CompletableFuture.completedFuture(createContextData())
+        val context = Context.create(config, dataFuture, null, eventHandler, null, null)
+        context.waitUntilReady()
+
+        context.track("goal1", mapOf("amount" to 125))
+        assertEquals(1, context.pendingCount)
+
+        val future = context.publish()
+        try {
+            future.get()
+        } catch (_: Exception) {}
+
+        assertEquals(1, context.pendingCount)
+    }
+
+    // --- Override after close ---
+
+    @Test
+    fun setOverrideSucceedsAfterClose() {
+        val context = createContext()
+        context.close()
+        assertTrue(context.isClosed)
+        context.setOverride("exp_test_ab", 2)
     }
 }
