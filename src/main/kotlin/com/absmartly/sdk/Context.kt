@@ -223,13 +223,13 @@ class Context private constructor(
 
     val experiments: List<String>
         get() {
-            checkReady(true)
+            if (!ready_ || closed_.get() || closing_.get()) return emptyList()
             return data.experiments.map { it.name }
         }
 
     val variableKeys: Map<String, List<String>>
         get() {
-            checkReady(true)
+            if (!ready_ || closed_.get() || closing_.get()) return emptyMap()
             val result = mutableMapOf<String, List<String>>()
             for ((key, exps) in indexVariables_) {
                 result[key] = exps.map { it.data.name }
@@ -239,6 +239,7 @@ class Context private constructor(
 
     val customFieldKeys: Set<String>
         get() {
+            if (!ready_ || closed_.get() || closing_.get()) return emptySet()
             val keys = mutableSetOf<String>()
             for (experiment in data.experiments) {
                 experiment.customFieldValues?.forEach { keys.add(it.name) }
@@ -288,7 +289,7 @@ class Context private constructor(
     }
 
     fun getTreatment(experimentName: String): Int {
-        checkReady(true)
+        if (!ready_ || closed_.get() || closing_.get()) return 0
         val assignment = getAssignment(experimentName)
         if (!assignment.exposed.get()) {
             queueExposure(assignment)
@@ -297,12 +298,12 @@ class Context private constructor(
     }
 
     fun peekTreatment(experimentName: String): Int {
-        checkReady(true)
+        if (!ready_ || closed_.get() || closing_.get()) return 0
         return getAssignment(experimentName).variant
     }
 
     fun getVariableValue(key: String, defaultValue: Any?): Any? {
-        checkReady(true)
+        if (!ready_ || closed_.get() || closing_.get()) return defaultValue
         val assignment = getVariableAssignment(key)
         if (assignment != null && assignment.variables != null) {
             if (!assignment.exposed.get()) {
@@ -316,7 +317,7 @@ class Context private constructor(
     }
 
     fun peekVariableValue(key: String, defaultValue: Any?): Any? {
-        checkReady(true)
+        if (!ready_ || closed_.get() || closing_.get()) return defaultValue
         val assignment = getVariableAssignment(key)
         if (assignment != null && assignment.variables != null) {
             if (assignment.variables!!.containsKey(key)) {
@@ -327,6 +328,7 @@ class Context private constructor(
     }
 
     fun getCustomFieldValue(experimentName: String, key: String): Any? {
+        if (!ready_ || closed_.get() || closing_.get()) return null
         val experiment = index_[experimentName] ?: return null
         val field = experiment.data.customFieldValues?.find { it.name == key } ?: return null
         if (field.value == null) return null
@@ -352,6 +354,7 @@ class Context private constructor(
     }
 
     fun getCustomFieldValueType(experimentName: String, key: String): String? {
+        if (!ready_ || closed_.get() || closing_.get()) return null
         val experiment = index_[experimentName] ?: return null
         val field = experiment.data.customFieldValues?.find { it.name == key } ?: return null
         return field.type

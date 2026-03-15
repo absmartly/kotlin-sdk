@@ -589,12 +589,10 @@ class ContextTest {
     }
 
     @Test
-    fun closedContextThrowsOnGetTreatment() {
+    fun closedContextReturnsZeroForGetTreatment() {
         val context = createContext()
         context.close()
-        assertFailsWith<IllegalStateException> {
-            context.getTreatment("exp_test_ab")
-        }
+        assertEquals(0, context.getTreatment("exp_test_ab"))
     }
 
     @Test
@@ -1138,5 +1136,44 @@ class ContextTest {
         val context = createContext()
         context.setCustomAssignments(mapOf("exp_test_ab" to 2))
         assertEquals(2, context.getTreatment("exp_test_ab"))
+    }
+
+    // --- Returns defaults when not ready ---
+
+    @Test
+    fun returnsDefaultsWhenNotReady() {
+        val dataFuture = java.util.concurrent.CompletableFuture<ContextData>()
+        val config = ContextConfig.create().setUnits(units)
+        val context = Context.create(config, dataFuture, null, null, null, null)
+        assertFalse(context.isReady)
+
+        assertEquals(0, context.getTreatment("exp_test_ab"))
+        assertEquals(0, context.peekTreatment("exp_test_ab"))
+        assertEquals("default", context.getVariableValue("banner.border", "default"))
+        assertEquals("default", context.peekVariableValue("banner.border", "default"))
+        assertEquals(emptyList<String>(), context.experiments)
+        assertEquals(emptyMap<String, List<String>>(), context.variableKeys)
+        assertEquals(emptySet<String>(), context.customFieldKeys)
+        assertNull(context.getCustomFieldValue("exp_test_ab", "key"))
+        assertNull(context.getCustomFieldValueType("exp_test_ab", "key"))
+    }
+
+    // --- Returns defaults when closed ---
+
+    @Test
+    fun returnsDefaultsWhenClosed() {
+        val context = createContext()
+        context.close()
+        assertTrue(context.isClosed)
+
+        assertEquals(0, context.getTreatment("exp_test_ab"))
+        assertEquals(0, context.peekTreatment("exp_test_ab"))
+        assertEquals("default", context.getVariableValue("banner.border", "default"))
+        assertEquals("default", context.peekVariableValue("banner.border", "default"))
+        assertEquals(emptyList<String>(), context.experiments)
+        assertEquals(emptyMap<String, List<String>>(), context.variableKeys)
+        assertEquals(emptySet<String>(), context.customFieldKeys)
+        assertNull(context.getCustomFieldValue("exp_test_ab", "key"))
+        assertNull(context.getCustomFieldValueType("exp_test_ab", "key"))
     }
 }
