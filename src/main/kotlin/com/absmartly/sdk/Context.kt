@@ -156,6 +156,8 @@ class Context private constructor(
     val isFailed: Boolean get() = failed_
     val isClosed: Boolean get() = closed_.get()
     val isClosing: Boolean get() = !closed_.get() && closing_.get()
+    val isFinalized: Boolean get() = isClosed
+    val isFinalizing: Boolean get() = isClosing
 
     val pendingCount: Int get() = pendingCount_.get()
 
@@ -249,7 +251,7 @@ class Context private constructor(
         val uidStr = uid.trim()
         val previous = units[unitType]
         if (previous != null && previous != uidStr) {
-            throw IllegalArgumentException("Unit '$unitType' already set.")
+            throw IllegalArgumentException("Unit '$unitType' UID already set.")
         }
         if (uidStr.isEmpty()) {
             throw IllegalArgumentException("Unit '$unitType' UID must not be blank.")
@@ -384,6 +386,11 @@ class Context private constructor(
                 closing_.set(false)
             }
         }
+    }
+
+    @Deprecated("Use close() instead", ReplaceWith("close()"))
+    fun finalize() {
+        close()
     }
 
     fun setDataAndReady(newData: ContextData) {
@@ -697,12 +704,12 @@ class Context private constructor(
     }
 
     private fun checkReady(expectNotClosed: Boolean) {
-        if (!ready_) throw IllegalStateException("ABSmartly Context is not yet ready")
+        if (!ready_) throw IllegalStateException("ABsmartly Context is not yet ready.")
         if (expectNotClosed) checkNotClosed()
     }
 
     private fun checkNotClosed() {
-        if (closed_.get()) throw IllegalStateException("ABSmartly Context is finalized")
-        if (closing_.get()) throw IllegalStateException("ABSmartly Context is closing")
+        if (closed_.get()) throw IllegalStateException("ABsmartly Context is finalized.")
+        if (closing_.get()) throw IllegalStateException("ABsmartly Context is closing.")
     }
 }

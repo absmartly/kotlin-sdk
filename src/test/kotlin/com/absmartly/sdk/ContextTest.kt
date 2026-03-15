@@ -657,6 +657,25 @@ class ContextTest {
         assertTrue(context.isClosed)
     }
 
+    @Test
+    fun finalizeIsAliasForClose() {
+        val context = createContext()
+        assertFalse(context.isFinalized)
+        assertFalse(context.isFinalizing)
+        @Suppress("DEPRECATION")
+        context.finalize()
+        assertTrue(context.isFinalized)
+        assertTrue(context.isClosed)
+    }
+
+    @Test
+    fun isFinalizedReflectsClosedState() {
+        val context = createContext()
+        assertFalse(context.isFinalized)
+        context.close()
+        assertTrue(context.isFinalized)
+    }
+
     // --- Refresh ---
 
     @Test
