@@ -119,6 +119,7 @@ class Context private constructor(
 
     @Volatile private var ready_ = false
     @Volatile private var failed_ = false
+    @Volatile private var readyError_: Throwable? = null
     private val closed_ = AtomicBoolean(false)
     private val closing_ = AtomicBoolean(false)
 
@@ -154,8 +155,47 @@ class Context private constructor(
     val isReady: Boolean get() = ready_
     val isFailed: Boolean get() = failed_
     val isClosed: Boolean get() = closed_.get()
+    val isClosing: Boolean get() = !closed_.get() && closing_.get()
 
     val pendingCount: Int get() = pendingCount_.get()
+
+    fun readyError(): Throwable? = readyError_
+
+    fun getUnits(): Map<String, String> = HashMap(units)
+
+    fun getAttributes(): Map<String, Any?> {
+        val result = mutableMapOf<String, Any?>()
+        synchronized(attributes_) {
+            for (attr in attributes_) {
+                result[attr.name] = attr.value
+            }
+        }
+        return result
+    }
+
+    fun setUnits(newUnits: Map<String, String>) {
+        for ((k, v) in newUnits) {
+            setUnit(k, v)
+        }
+    }
+
+    fun setAttributes(newAttributes: Map<String, Any?>) {
+        for ((k, v) in newAttributes) {
+            setAttribute(k, v)
+        }
+    }
+
+    fun setOverrides(newOverrides: Map<String, Int>) {
+        for ((k, v) in newOverrides) {
+            setOverride(k, v)
+        }
+    }
+
+    fun setCustomAssignments(newAssignments: Map<String, Int>) {
+        for ((k, v) in newAssignments) {
+            setCustomAssignment(k, v)
+        }
+    }
 
     fun waitUntilReady(): Context {
         if (!ready_) {
@@ -409,6 +449,7 @@ class Context private constructor(
 
     private fun setDataFailed(exception: Throwable) {
         failed_ = true
+        readyError_ = exception
         ready_ = true
         logEvent(ContextEventLogger.EventType.Error, exception)
     }

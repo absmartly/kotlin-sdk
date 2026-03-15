@@ -1013,4 +1013,111 @@ class ContextTest {
         assertTrue(context.isClosed)
         context.setOverride("exp_test_ab", 2)
     }
+
+    // --- readyError ---
+
+    @Test
+    fun readyErrorReturnsNullOnSuccess() {
+        val context = createContext()
+        assertNull(context.readyError())
+    }
+
+    @Test
+    fun readyErrorReturnsExceptionOnDataFailure() {
+        val exception = RuntimeException("data failed")
+        val failedFuture = java.util.concurrent.CompletableFuture.completedFuture(createContextData()).also {
+            val f = java.util.concurrent.CompletableFuture<ContextData>()
+            f.completeExceptionally(exception)
+            val config = ContextConfig.create().setUnits(units)
+            val ctx = Context.create(config, f, null, null, null, null)
+            ctx.waitUntilReady()
+            assertTrue(ctx.isFailed)
+            assertNotNull(ctx.readyError())
+        }
+    }
+
+    // --- isClosing ---
+
+    @Test
+    fun isClosingReturnsFalseWhenNotClosing() {
+        val context = createContext()
+        assertFalse(context.isClosing)
+    }
+
+    @Test
+    fun isClosingReturnsFalseAfterClose() {
+        val context = createContext()
+        context.close()
+        assertFalse(context.isClosing)
+        assertTrue(context.isClosed)
+    }
+
+    // --- getUnits ---
+
+    @Test
+    fun getUnitsReturnsAllUnits() {
+        val context = createContext()
+        val result = context.getUnits()
+        assertEquals(units["session_id"], result["session_id"])
+        assertEquals(units["user_id"], result["user_id"])
+        assertEquals(units["email"], result["email"])
+    }
+
+    // --- getAttributes ---
+
+    @Test
+    fun getAttributesReturnsAllAttributes() {
+        val context = createContext()
+        context.setAttribute("key1", "val1")
+        context.setAttribute("key2", 42)
+        val result = context.getAttributes()
+        assertEquals("val1", result["key1"])
+        assertEquals(42, result["key2"])
+    }
+
+    @Test
+    fun getAttributesReturnsEmptyMapWhenNoAttributes() {
+        val context = createContext(units = mutableMapOf())
+        val result = context.getAttributes()
+        assertTrue(result.isEmpty())
+    }
+
+    // --- setUnits bulk setter ---
+
+    @Test
+    fun setUnitsBulkSetsAllUnits() {
+        val context = createContext(units = mutableMapOf())
+        context.setUnits(mapOf("user_id" to "abc", "email" to "test@test.com"))
+        assertEquals("abc", context.getUnit("user_id"))
+        assertEquals("test@test.com", context.getUnit("email"))
+    }
+
+    // --- setAttributes bulk setter ---
+
+    @Test
+    fun setAttributesBulkSetsAllAttributes() {
+        val context = createContext()
+        context.setAttributes(mapOf("k1" to "v1", "k2" to 99))
+        assertEquals("v1", context.getAttribute("k1"))
+        assertEquals(99, context.getAttribute("k2"))
+    }
+
+    // --- setOverrides bulk setter ---
+
+    @Test
+    fun setOverridesBulkSetsAllOverrides() {
+        val context = createContext()
+        context.setOverrides(mapOf("exp_test_ab" to 2, "exp_test_abc" to 1))
+        assertEquals(2, context.getTreatment("exp_test_ab"))
+        assertEquals(1, context.getTreatment("exp_test_abc"))
+    }
+
+    // --- setCustomAssignments bulk setter ---
+
+    @Test
+    fun setCustomAssignmentsBulkSetsAll() {
+        val context = createContext()
+        context.setCustomAssignments(mapOf("exp_test_ab" to 2))
+        assertEquals(2, context.getTreatment("exp_test_ab"))
+    }
 }
