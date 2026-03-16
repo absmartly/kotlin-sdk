@@ -407,14 +407,12 @@ class Context private constructor(
             return CompletableFuture.completedFuture(null)
         }
         return dataProvider.getContextData().thenAccept { newData ->
-            assignmentCache.clear()
             setData(newData)
             logEvent(ContextEventLogger.EventType.Refresh, newData)
         }
     }
 
     fun refresh(newData: ContextData) {
-        assignmentCache.clear()
         setData(newData)
         logEvent(ContextEventLogger.EventType.Refresh, newData)
     }
@@ -455,6 +453,19 @@ class Context private constructor(
         index_ = newIndex
         indexVariables_ = newVarIndex
         ready_ = true
+
+        val iter = assignmentCache.iterator()
+        while (iter.hasNext()) {
+            val entry = iter.next()
+            val assignment = entry.value
+            if (assignment.overridden) continue
+            val experiment = newIndex[entry.key]
+            if (experiment == null) {
+                if (assignment.assigned) iter.remove()
+            } else if (!experimentMatches(experiment.data, assignment)) {
+                iter.remove()
+            }
+        }
     }
 
     private fun setDataFailed(exception: Throwable) {
