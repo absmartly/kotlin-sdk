@@ -458,12 +458,15 @@ class Context private constructor(
         while (iter.hasNext()) {
             val entry = iter.next()
             val assignment = entry.value
-            if (assignment.overridden) continue
             val experiment = newIndex[entry.key]
             if (experiment == null) {
-                if (assignment.assigned) iter.remove()
+                if (assignment.assigned && !assignment.overridden) iter.remove()
             } else if (!experimentMatches(experiment.data, assignment)) {
-                iter.remove()
+                if (assignment.overridden) {
+                    continue
+                } else {
+                    iter.remove()
+                }
             }
         }
     }
