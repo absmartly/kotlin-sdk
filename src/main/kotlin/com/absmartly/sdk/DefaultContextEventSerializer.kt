@@ -9,6 +9,7 @@ class DefaultContextEventSerializer : ContextEventSerializer {
         return try {
             writer.writeValueAsBytes(event)
         } catch (e: Exception) {
+            System.err.println("ABSmartly: Failed to serialize publish event: ${e.message}")
             null
         }
     }

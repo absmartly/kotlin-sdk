@@ -3,6 +3,7 @@ package com.absmartly.sdk
 import java.io.Closeable
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
+import java.util.concurrent.ForkJoinPool
 
 class Client private constructor(config: ClientConfig, private val httpClient: HTTPClient) : Closeable {
 
@@ -70,7 +71,7 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
     fun getContextData(): CompletableFuture<ContextData> {
         val dataFuture = CompletableFuture<ContextData>()
 
-        httpClient.get(url, query, null).thenAccept { response ->
+        httpClient.get(url, query, headers).thenAccept { response ->
             val code = response.statusCode
             if (code / 100 == 2) {
                 val content = response.content
@@ -104,7 +105,7 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
 
         CompletableFuture.supplyAsync({
             serializer.serialize(event)
-        }, executor ?: CompletableFuture.completedFuture(null).defaultExecutor()).thenCompose { content ->
+        }, executor ?: ForkJoinPool.commonPool()).thenCompose { content ->
             if (content != null) {
                 httpClient.put(url, null, headers, content)
             } else {

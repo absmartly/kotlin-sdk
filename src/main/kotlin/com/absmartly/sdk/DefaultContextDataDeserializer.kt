@@ -9,6 +9,7 @@ class DefaultContextDataDeserializer : ContextDataDeserializer {
         return try {
             reader.readValue(bytes, offset, length)
         } catch (e: Exception) {
+            System.err.println("ABSmartly: Failed to deserialize context data: ${e.message}")
             null
         }
     }

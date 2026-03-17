@@ -5,6 +5,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
 
@@ -36,9 +37,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
             val config = ABSmartlyConfig.create()
                 .setClient(Client.create(clientConfig))
 
-            if (eventLogger != null) {
-                config.setContextEventLogger(eventLogger!!)
-            }
+            eventLogger?.let { config.setContextEventLogger(it) }
 
             return create(config)
         }
@@ -52,7 +51,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
         fun create(config: ABSmartlyConfig): ABsmartly = ABsmartly(config)
     }
 
-    private var client: Client?
+    private val client_: AtomicReference<Client?>
     private var contextDataProvider: ContextDataProvider
     private var contextEventHandler: ContextEventHandler
     private val contextEventLogger: ContextEventLogger?
@@ -64,20 +63,16 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
         var provider = config.contextDataProvider
         var handler = config.contextEventHandler
 
-        if (provider == null || handler == null) {
-            client = config.client ?: throw IllegalArgumentException("Missing Client instance")
-
-            if (provider == null) {
-                provider = DefaultContextDataProvider(client!!)
-            }
-
-            if (handler == null) {
-                handler = DefaultContextEventHandler(client!!)
-            }
+        val client = if (provider == null || handler == null) {
+            val c = config.client ?: throw IllegalArgumentException("Missing Client instance")
+            if (provider == null) provider = DefaultContextDataProvider(c)
+            if (handler == null) handler = DefaultContextEventHandler(c)
+            c
         } else {
-            client = config.client
+            config.client
         }
 
+        client_ = AtomicReference(client)
         contextDataProvider = provider
         contextEventHandler = handler
         scheduler = ScheduledThreadPoolExecutor(1)
@@ -110,10 +105,8 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
     }
 
     override fun close() {
-        if (client != null) {
-            client!!.close()
-            client = null
-        }
+        val client = client_.getAndSet(null)
+        client?.close()
 
         scheduler.shutdown()
         try {

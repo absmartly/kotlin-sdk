@@ -2,18 +2,30 @@ package com.absmartly.sdk
 
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
-import java.net.URL
+import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
-import java.util.concurrent.Executors
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class DefaultHTTPClient private constructor(private val executor: Executor) : HTTPClient {
 
     companion object {
+        private const val CONNECT_TIMEOUT_MS = 5000
+        private const val READ_TIMEOUT_MS = 10000
+
         @JvmStatic
         fun create(): DefaultHTTPClient {
-            return DefaultHTTPClient(Executors.newCachedThreadPool())
+            val maxThreads = Runtime.getRuntime().availableProcessors() * 2
+            val executor = ThreadPoolExecutor(
+                0, maxThreads,
+                60L, TimeUnit.SECONDS,
+                LinkedBlockingQueue()
+            )
+            return DefaultHTTPClient(executor)
         }
 
         @JvmStatic
@@ -23,54 +35,47 @@ class DefaultHTTPClient private constructor(private val executor: Executor) : HT
     }
 
     override fun get(url: String, query: Map<String, String>?, headers: Map<String, String>?): CompletableFuture<HTTPClient.Response> {
-        return CompletableFuture.supplyAsync({
-            val fullUrl = buildUrl(url, query)
-            val connection = URL(fullUrl).openConnection() as HttpURLConnection
-            try {
-                connection.requestMethod = "GET"
-                applyHeaders(connection, headers)
-                readResponse(connection)
-            } finally {
-                connection.disconnect()
-            }
-        }, executor)
+        return execute(url, query, headers, "GET", null)
     }
 
     override fun put(url: String, query: Map<String, String>?, headers: Map<String, String>?, body: ByteArray): CompletableFuture<HTTPClient.Response> {
-        return CompletableFuture.supplyAsync({
-            val fullUrl = buildUrl(url, query)
-            val connection = URL(fullUrl).openConnection() as HttpURLConnection
-            try {
-                connection.requestMethod = "PUT"
-                connection.doOutput = true
-                applyHeaders(connection, headers)
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.outputStream.use { it.write(body) }
-                readResponse(connection)
-            } finally {
-                connection.disconnect()
-            }
-        }, executor)
+        return execute(url, query, headers, "PUT", body)
     }
 
     override fun post(url: String, query: Map<String, String>?, headers: Map<String, String>?, body: ByteArray): CompletableFuture<HTTPClient.Response> {
+        return execute(url, query, headers, "POST", body)
+    }
+
+    override fun close() {
+        (executor as? ExecutorService)?.shutdown()
+    }
+
+    private fun execute(
+        url: String,
+        query: Map<String, String>?,
+        headers: Map<String, String>?,
+        method: String,
+        body: ByteArray?
+    ): CompletableFuture<HTTPClient.Response> {
         return CompletableFuture.supplyAsync({
             val fullUrl = buildUrl(url, query)
-            val connection = URL(fullUrl).openConnection() as HttpURLConnection
+            val connection = URI(fullUrl).toURL().openConnection() as HttpURLConnection
             try {
-                connection.requestMethod = "POST"
-                connection.doOutput = true
+                connection.connectTimeout = CONNECT_TIMEOUT_MS
+                connection.readTimeout = READ_TIMEOUT_MS
+                connection.requestMethod = method
                 applyHeaders(connection, headers)
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.outputStream.use { it.write(body) }
+                if (body != null) {
+                    connection.doOutput = true
+                    connection.setRequestProperty("Content-Type", "application/json")
+                    connection.outputStream.use { it.write(body) }
+                }
                 readResponse(connection)
             } finally {
                 connection.disconnect()
             }
         }, executor)
     }
-
-    override fun close() {}
 
     private fun buildUrl(base: String, query: Map<String, String>?): String {
         if (query.isNullOrEmpty()) return base

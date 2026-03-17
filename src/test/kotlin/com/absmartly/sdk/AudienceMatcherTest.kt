@@ -112,10 +112,6 @@ class AudienceMatcherTest {
 
         val contextData = om.convertValue(request["data"], ContextData::class.java)
 
-        val experiment = contextData.experiments[0]
-        println("audience field type: ${experiment.audience?.javaClass}")
-        println("audience field value: ${experiment.audience}")
-
         val units = mutableMapOf("session_id" to "e791e240fcd3df7d238cfc285f475e8152fcc0ec")
 
         val exposures = mutableListOf<Exposure>()

@@ -157,9 +157,9 @@ internal object JsonExpr {
         val nb = toNumber(b)
         if (na != null && nb != null) return na.compareTo(nb)
 
-        val sa = a.toString()
-        val sb = b.toString()
-        return sa.compareTo(sb)
+        if (a is String && b is String) return a.compareTo(b)
+
+        return null
     }
 
     private fun toNumber(v: Any?): Double? {
