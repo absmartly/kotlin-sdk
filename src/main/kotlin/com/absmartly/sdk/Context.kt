@@ -38,6 +38,9 @@ class Context private constructor(
         if (startReady) {
             setData(data)
             ready_ = true
+            readyFuture_.set(COMPLETED_VOID_FUTURE)
+        } else {
+            readyFuture_.set(CompletableFuture())
         }
     }
 
@@ -74,11 +77,17 @@ class Context private constructor(
             }
 
             if (dataFuture.isDone) {
+                val readyFuture = CompletableFuture<Void>()
+                context.readyFuture_.set(readyFuture)
                 dataFuture.thenAccept { data ->
                     context.setData(data)
+                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                    rf?.complete(null)
                     context.logEvent(ContextEventLogger.EventType.Ready, data)
                 }.exceptionally { exception ->
                     context.setDataFailed(exception)
+                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                    rf?.complete(null)
                     null
                 }
             } else {
@@ -399,6 +408,7 @@ class Context private constructor(
     fun setDataAndReady(newData: ContextData) {
         setData(newData)
         ready_ = true
+        readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
         logEvent(ContextEventLogger.EventType.Ready, newData)
     }
 
@@ -675,16 +685,17 @@ class Context private constructor(
         logEvent(ContextEventLogger.EventType.Publish, event)
 
         if (eventHandler != null) {
-            return eventHandler.publish(this, event).exceptionally { exception ->
-                for (exposure in exposureList) {
-                    exposures_.add(exposure)
+            return eventHandler.publish(this, event).whenComplete { _, exception ->
+                if (exception != null) {
+                    for (exposure in exposureList) {
+                        exposures_.add(exposure)
+                    }
+                    for (goal in goalList) {
+                        achievements_.add(goal)
+                    }
+                    pendingCount_.addAndGet(drained)
+                    logEvent(ContextEventLogger.EventType.Error, exception)
                 }
-                for (goal in goalList) {
-                    achievements_.add(goal)
-                }
-                pendingCount_.addAndGet(drained)
-                logEvent(ContextEventLogger.EventType.Error, exception)
-                null
             }
         }
 

@@ -1056,15 +1056,13 @@ class ContextTest {
     @Test
     fun readyErrorReturnsExceptionOnDataFailure() {
         val exception = RuntimeException("data failed")
-        val failedFuture = java.util.concurrent.CompletableFuture.completedFuture(createContextData()).also {
-            val f = java.util.concurrent.CompletableFuture<ContextData>()
-            f.completeExceptionally(exception)
-            val config = ContextConfig.create().setUnits(units)
-            val ctx = Context.create(config, f, null, null, null, null)
-            ctx.waitUntilReady()
-            assertTrue(ctx.isFailed)
-            assertNotNull(ctx.readyError())
-        }
+        val f = java.util.concurrent.CompletableFuture<ContextData>()
+        f.completeExceptionally(exception)
+        val config = ContextConfig.create().setUnits(units)
+        val ctx = Context.create(config, f, null, null, null, null)
+        ctx.waitUntilReady()
+        assertTrue(ctx.isFailed)
+        assertNotNull(ctx.readyError())
     }
 
     // --- isClosing ---

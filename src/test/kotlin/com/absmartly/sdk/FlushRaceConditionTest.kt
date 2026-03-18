@@ -36,14 +36,16 @@ class FlushRaceConditionTest {
         context.track("goal1", null)
         val initialCount = context.pendingCount
         assertTrue(initialCount > 0)
-        context.publish()
+        context.publish().get()
         assertTrue(context.pendingCount >= 0)
+        assertTrue(context.pendingCount <= initialCount)
     }
 
     @Test
     fun concurrentTrackAndFlush() {
         val context = createTestContext()
         val latch = CountDownLatch(1)
+        val failures = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
 
         context.track("goal1", null)
         context.track("goal2", null)
@@ -51,14 +53,22 @@ class FlushRaceConditionTest {
         val trackThread = Thread {
             latch.await()
             for (i in 0 until 100) {
-                try { context.track("concurrent_goal_$i", null) } catch (_: Exception) {}
+                try {
+                    context.track("concurrent_goal_$i", null)
+                } catch (t: Throwable) {
+                    failures.add(t)
+                }
             }
         }
 
         val flushThread = Thread {
             latch.await()
             for (i in 0 until 10) {
-                try { context.publish() } catch (_: Exception) {}
+                try {
+                    context.publish().get()
+                } catch (t: Throwable) {
+                    failures.add(t)
+                }
             }
         }
 
@@ -69,6 +79,7 @@ class FlushRaceConditionTest {
         trackThread.join(5000)
         flushThread.join(5000)
 
+        assertTrue(failures.isEmpty(), "Unexpected concurrent failures: $failures")
         assertTrue(context.pendingCount >= 0)
     }
 }

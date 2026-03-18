@@ -35,12 +35,12 @@ tasks.test {
     testLogging {
         showStandardStreams = false
         events("passed", "failed", "skipped")
-        afterSuite(KotlinClosure2<TestDescriptor, TestResult, Unit>({ desc, result ->
-            if (desc.parent == null) {
-                println("\n${result.successfulTestCount} tests completed, ${result.failedTestCount} failed")
-            }
-        }))
     }
+    afterSuite(KotlinClosure2<TestDescriptor, TestResult, Unit>({ desc, result ->
+        if (desc.parent == null) {
+            println("\n${result.successfulTestCount} passed, ${result.failedTestCount} failed, ${result.skippedTestCount} skipped")
+        }
+    }))
 }
 
 java {
