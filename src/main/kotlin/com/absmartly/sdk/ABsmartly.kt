@@ -53,7 +53,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
 
     private val client_: AtomicReference<Client?>
     private var contextDataProvider: ContextDataProvider
-    private var contextEventHandler: ContextPublisher
+    private var contextPublisher: ContextPublisher
     private val contextEventLogger: ContextEventLogger?
     private var scheduler: ScheduledExecutorService
 
@@ -61,7 +61,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
         contextEventLogger = config.contextEventLogger
 
         var provider = config.contextDataProvider
-        var handler = config.contextEventHandler
+        var handler = config.contextPublisher
 
         val client = if (provider == null || handler == null) {
             val c = config.client ?: throw IllegalArgumentException("Missing Client instance")
@@ -74,7 +74,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
 
         client_ = AtomicReference(client)
         contextDataProvider = provider
-        contextEventHandler = handler
+        contextPublisher = handler
         scheduler = ScheduledThreadPoolExecutor(1)
     }
 
@@ -83,7 +83,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
             config = config,
             dataFuture = contextDataProvider.getContextData(),
             dataProvider = contextDataProvider,
-            eventHandler = contextEventHandler,
+            eventHandler = contextPublisher,
             eventLogger = contextEventLogger,
             scheduler = scheduler
         )
@@ -94,7 +94,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
             config = config,
             dataFuture = CompletableFuture.completedFuture(data),
             dataProvider = contextDataProvider,
-            eventHandler = contextEventHandler,
+            eventHandler = contextPublisher,
             eventLogger = contextEventLogger,
             scheduler = scheduler
         )
