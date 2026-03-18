@@ -53,7 +53,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
 
     private val client_: AtomicReference<Client?>
     private var contextDataProvider: ContextDataProvider
-    private var contextEventHandler: ContextEventHandler
+    private var contextEventHandler: ContextPublisher
     private val contextEventLogger: ContextEventLogger?
     private var scheduler: ScheduledExecutorService
 
@@ -66,7 +66,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
         val client = if (provider == null || handler == null) {
             val c = config.client ?: throw IllegalArgumentException("Missing Client instance")
             if (provider == null) provider = DefaultContextDataProvider(c)
-            if (handler == null) handler = DefaultContextEventHandler(c)
+            if (handler == null) handler = DefaultContextPublisher(c)
             c
         } else {
             config.client

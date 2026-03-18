@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicReference
 class Context private constructor(
     private val units: MutableMap<String, String>,
     private val eventLogger: ContextEventLogger?,
-    private val eventHandler: ContextEventHandler?,
+    private val eventHandler: ContextPublisher?,
     private val dataProvider: ContextDataProvider?,
     private val publishDelay: Long,
     private val refreshInterval: Long,
@@ -48,7 +48,7 @@ class Context private constructor(
             config: ContextConfig,
             dataFuture: CompletableFuture<ContextData>,
             dataProvider: ContextDataProvider?,
-            eventHandler: ContextEventHandler?,
+            eventHandler: ContextPublisher?,
             eventLogger: ContextEventLogger?,
             scheduler: ScheduledExecutorService?
         ): Context {

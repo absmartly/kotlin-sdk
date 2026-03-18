@@ -1011,7 +1011,7 @@ class ContextTest {
     @Test
     fun publishKeepsEventsPendingOnFailure() {
         val failure = RuntimeException("PUBLISH_FAILED")
-        val eventHandler = object : ContextEventHandler {
+        val eventHandler = object : ContextPublisher {
             override fun publish(context: Context, event: PublishEvent): java.util.concurrent.CompletableFuture<Void> {
                 val future = java.util.concurrent.CompletableFuture<Void>()
                 future.completeExceptionally(failure)
