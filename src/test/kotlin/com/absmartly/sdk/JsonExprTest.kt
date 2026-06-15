@@ -192,20 +192,20 @@ class JsonExprTest {
     @Test
     fun inOperatorWithStrings() {
         assertTrue(JsonExpr.evaluateBooleanExpr(
-            mapOf("in" to listOf(mapOf("value" to "cd"), mapOf("value" to "abcdef"))), emptyVars
+            mapOf("in" to listOf(mapOf("value" to "abcdef"), mapOf("value" to "cd"))), emptyVars
         ))
         assertFalse(JsonExpr.evaluateBooleanExpr(
-            mapOf("in" to listOf(mapOf("value" to "xy"), mapOf("value" to "abcdef"))), emptyVars
+            mapOf("in" to listOf(mapOf("value" to "abcdef"), mapOf("value" to "xy"))), emptyVars
         ))
     }
 
     @Test
     fun inOperatorWithList() {
         assertTrue(JsonExpr.evaluateBooleanExpr(
-            mapOf("in" to listOf(mapOf("value" to 2), mapOf("value" to listOf(1, 2, 3)))), emptyVars
+            mapOf("in" to listOf(mapOf("value" to listOf(1, 2, 3)), mapOf("value" to 2))), emptyVars
         ))
         assertFalse(JsonExpr.evaluateBooleanExpr(
-            mapOf("in" to listOf(mapOf("value" to 5), mapOf("value" to listOf(1, 2, 3)))), emptyVars
+            mapOf("in" to listOf(mapOf("value" to listOf(1, 2, 3)), mapOf("value" to 5))), emptyVars
         ))
     }
 
