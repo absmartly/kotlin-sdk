@@ -89,7 +89,7 @@ internal object JsonExpr {
                 val value = evaluate(args, vars)
                 value == null
             }
-            "eq" -> binaryOp(args, vars) { a, b -> compare(a, b) == 0 }
+            "eq" -> binaryOp(args, vars) { a, b -> if (a == null || b == null) null else compare(a, b) == 0 }
             "gt" -> binaryOp(args, vars) { a, b -> val c = compare(a, b); c != null && c > 0 }
             "gte" -> binaryOp(args, vars) { a, b -> val c = compare(a, b); c != null && c >= 0 }
             "lt" -> binaryOp(args, vars) { a, b -> val c = compare(a, b); c != null && c < 0 }
