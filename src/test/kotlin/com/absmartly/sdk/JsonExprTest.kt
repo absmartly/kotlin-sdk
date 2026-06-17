@@ -129,7 +129,8 @@ class JsonExprTest {
         assertFalse(JsonExpr.evaluateBooleanExpr(
             mapOf("eq" to listOf(mapOf("value" to "abc"), mapOf("value" to "def"))), emptyVars
         ))
-        assertTrue(JsonExpr.evaluateBooleanExpr(
+        // eq(null, null) is canonically null (not a match); coerced to false.
+        assertFalse(JsonExpr.evaluateBooleanExpr(
             mapOf("eq" to listOf(mapOf("value" to null), mapOf("value" to null))), emptyVars
         ))
     }
