@@ -54,6 +54,15 @@ class UTF8EncodingTest {
         val hash1 = Hashing.hashUnit("\u4e16\u754c\u4f60\u597d")
         val hash2 = Hashing.hashUnit("\u4e16\u754c\u4f60\u597d")
         assertEquals(String(hash1, Charsets.US_ASCII), String(hash2, Charsets.US_ASCII))
+        assertEquals(22, hash1.size)
+
+        // Characters outside the BMP are stored as UTF-16 surrogate pairs and must
+        // encode to 4-byte UTF-8; these canonical hashes are shared across all SDKs.
+        assertEquals("v2CJG7YcjjWncKOSCzF2GA", String(hash1, Charsets.US_ASCII))
+        assertEquals(
+            "SCgk4OzXlFMvo1UMsP88fA",
+            String(Hashing.hashUnit("user_\u4e16\u754c_123"), Charsets.US_ASCII),
+        )
     }
 
     @Test
@@ -61,6 +70,15 @@ class UTF8EncodingTest {
         val hash1 = Hashing.hashUnit("\uD83D\uDE00\uD83D\uDE01")
         val hash2 = Hashing.hashUnit("\uD83D\uDE00\uD83D\uDE01")
         assertEquals(String(hash1, Charsets.US_ASCII), String(hash2, Charsets.US_ASCII))
+        assertEquals(22, hash1.size)
+
+        // Characters outside the BMP are stored as UTF-16 surrogate pairs and must
+        // encode to 4-byte UTF-8; these canonical hashes are shared across all SDKs.
+        assertEquals(
+            "KgLqw51xanDs83V5GFkntg",
+            String(Hashing.hashUnit("\uD83D\uDE00"), Charsets.US_ASCII),
+        )
+        assertEquals("ZJuDalvUWRJnVtkspj-2bQ", String(hash1, Charsets.US_ASCII))
     }
 
     @Test
