@@ -224,7 +224,7 @@ internal object MD5 {
     }
 }
 
-object Hashing {
+internal object Hashing {
     private val threadBuffer = ThreadLocal.withInitial { ByteArray(512) }
 
     fun hashUnit(unit: CharSequence): ByteArray {
