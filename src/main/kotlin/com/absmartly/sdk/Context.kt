@@ -1,18 +1,115 @@
 package com.absmartly.sdk
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import java.io.Closeable
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
-class Context(
-    private var data: ContextData,
+class Context private constructor(
     private val units: MutableMap<String, String>,
-    private val options: ContextOptions,
-    private val eventLogger: ContextEventLogger? = null,
-    private val startReady: Boolean = true
-) {
+    private val eventLogger: ContextEventLogger?,
+    private val eventHandler: ContextPublisher?,
+    private val dataProvider: ContextDataProvider?,
+    private val publishDelay: Long,
+    private val refreshInterval: Long,
+    private val scheduler: ScheduledExecutorService?
+) : Closeable {
+
+    constructor(
+        data: ContextData,
+        units: MutableMap<String, String>,
+        options: ContextOptions,
+        eventLogger: ContextEventLogger? = null,
+        startReady: Boolean = true
+    ) : this(
+        units = units,
+        eventLogger = eventLogger,
+        eventHandler = null,
+        dataProvider = null,
+        publishDelay = options.publishDelay,
+        refreshInterval = options.refreshPeriod,
+        scheduler = null
+    ) {
+        if (startReady) {
+            setData(data)
+            ready_ = true
+            readyFuture_.set(COMPLETED_VOID_FUTURE)
+        } else {
+            readyFuture_.set(CompletableFuture())
+        }
+    }
+
+    companion object {
+        private val COMPLETED_VOID_FUTURE: CompletableFuture<Void> = CompletableFuture.completedFuture(null)
+
+        internal fun create(
+            config: ContextConfig,
+            dataFuture: CompletableFuture<ContextData>,
+            dataProvider: ContextDataProvider?,
+            eventHandler: ContextPublisher?,
+            eventLogger: ContextEventLogger?,
+            scheduler: ScheduledExecutorService?
+        ): Context {
+            val units = mutableMapOf<String, String>()
+            config.getUnits()?.let { units.putAll(it) }
+
+            val configLogger = config.eventLogger ?: eventLogger
+
+            val context = Context(
+                units = units,
+                eventLogger = configLogger,
+                eventHandler = eventHandler,
+                dataProvider = dataProvider,
+                publishDelay = config.publishDelay,
+                refreshInterval = config.refreshInterval,
+                scheduler = scheduler
+            )
+
+            config.getOverrides()?.forEach { (k, v) -> context.overrides[k] = v }
+            config.getCustomAssignments()?.forEach { (k, v) -> context.cassignments[k] = v }
+            config.getAttributes()?.forEach { (k, v) ->
+                context.setAttribute(k, v)
+            }
+
+            if (dataFuture.isDone) {
+                val readyFuture = CompletableFuture<Void>()
+                context.readyFuture_.set(readyFuture)
+                dataFuture.thenAccept { data ->
+                    context.setData(data)
+                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                    rf?.complete(null)
+                    context.logEvent(ContextEventLogger.EventType.Ready, data)
+                }.exceptionally { exception ->
+                    context.setDataFailed(exception)
+                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                    rf?.complete(null)
+                    null
+                }
+            } else {
+                val readyFuture = CompletableFuture<Void>()
+                context.readyFuture_.set(readyFuture)
+                dataFuture.thenAccept { data ->
+                    context.setData(data)
+                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                    rf?.complete(null)
+                    context.logEvent(ContextEventLogger.EventType.Ready, data)
+                }.exceptionally { exception ->
+                    context.setDataFailed(exception)
+                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                    rf?.complete(null)
+                    null
+                }
+            }
+
+            return context
+        }
+    }
+
     private val objectMapper = jacksonObjectMapper()
     private val assignmentCache = ConcurrentHashMap<String, Assignment>()
     private val overrides = ConcurrentHashMap<String, Int>()
@@ -25,16 +122,20 @@ class Context(
 
     private val audienceMatcher = AudienceMatcher()
 
+    private var data: ContextData = ContextData()
     private var index_ = mutableMapOf<String, ContextExperiment>()
     private var indexVariables_ = mutableMapOf<String, MutableList<ContextExperiment>>()
 
     @Volatile private var ready_ = false
     @Volatile private var failed_ = false
-    @Volatile private var closed_ = false
-    @Volatile private var closing_ = false
+    @Volatile private var readyError_: Throwable? = null
+    private val closed_ = AtomicBoolean(false)
+    private val closing_ = AtomicBoolean(false)
 
     private val attrsSeq_ = AtomicInteger(0)
     private val pendingCount_ = AtomicInteger(0)
+
+    private val readyFuture_ = AtomicReference<CompletableFuture<Void>?>(null)
 
     private class Assignment {
         var id: Int = 0
@@ -60,28 +161,84 @@ class Context(
         val variables: List<Map<String, Any?>>
     )
 
-    init {
-        if (startReady) {
-            setData(data)
-            ready_ = true
-        }
-    }
-
     val isReady: Boolean get() = ready_
     val isFailed: Boolean get() = failed_
-    val isClosed: Boolean get() = closed_
+    val isClosed: Boolean get() = closed_.get()
+    val isClosing: Boolean get() = !closed_.get() && closing_.get()
+    val isFinalized: Boolean get() = isClosed
+    val isFinalizing: Boolean get() = isClosing
 
     val pendingCount: Int get() = pendingCount_.get()
 
+    fun readyError(): Throwable? = readyError_
+
+    fun getUnits(): Map<String, String> = HashMap(units)
+
+    fun getAttributes(): Map<String, Any?> {
+        val result = mutableMapOf<String, Any?>()
+        synchronized(attributes_) {
+            for (attr in attributes_) {
+                result[attr.name] = attr.value
+            }
+        }
+        return result
+    }
+
+    fun setUnits(newUnits: Map<String, String>) {
+        for ((k, v) in newUnits) {
+            setUnit(k, v)
+        }
+    }
+
+    fun setAttributes(newAttributes: Map<String, Any?>) {
+        for ((k, v) in newAttributes) {
+            setAttribute(k, v)
+        }
+    }
+
+    fun setOverrides(newOverrides: Map<String, Int>) {
+        for ((k, v) in newOverrides) {
+            setOverride(k, v)
+        }
+    }
+
+    fun setCustomAssignments(newAssignments: Map<String, Int>) {
+        for ((k, v) in newAssignments) {
+            setCustomAssignment(k, v)
+        }
+    }
+
+    fun waitUntilReady(): Context {
+        if (!ready_) {
+            val future = readyFuture_.get()
+            if (future != null && !future.isDone) {
+                future.join()
+            }
+        }
+        return this
+    }
+
+    fun waitUntilReadyAsync(): CompletableFuture<Context> {
+        if (ready_) {
+            return CompletableFuture.completedFuture(this)
+        }
+        val rf = readyFuture_.get()
+        return if (rf != null) {
+            rf.thenApply { this }
+        } else {
+            CompletableFuture.completedFuture(this)
+        }
+    }
+
     val experiments: List<String>
         get() {
-            checkReady(true)
+            if (!ready_ || closed_.get() || closing_.get()) return emptyList()
             return data.experiments.map { it.name }
         }
 
     val variableKeys: Map<String, List<String>>
         get() {
-            checkReady(true)
+            if (!ready_ || closed_.get() || closing_.get()) return emptyMap()
             val result = mutableMapOf<String, List<String>>()
             for ((key, exps) in indexVariables_) {
                 result[key] = exps.map { it.data.name }
@@ -91,6 +248,7 @@ class Context(
 
     val customFieldKeys: Set<String>
         get() {
+            if (!ready_ || closed_.get() || closing_.get()) return emptySet()
             val keys = mutableSetOf<String>()
             for (experiment in data.experiments) {
                 experiment.customFieldValues?.forEach { keys.add(it.name) }
@@ -103,7 +261,7 @@ class Context(
         val uidStr = uid.trim()
         val previous = units[unitType]
         if (previous != null && previous != uidStr) {
-            throw IllegalArgumentException("Unit '$unitType' already set.")
+            throw IllegalArgumentException("Unit '$unitType' UID already set.")
         }
         if (uidStr.isEmpty()) {
             throw IllegalArgumentException("Unit '$unitType' UID must not be blank.")
@@ -131,7 +289,6 @@ class Context(
     }
 
     fun setOverride(experimentName: String, variant: Int) {
-        checkNotClosed()
         overrides[experimentName] = variant
     }
 
@@ -141,7 +298,7 @@ class Context(
     }
 
     fun getTreatment(experimentName: String): Int {
-        checkReady(true)
+        if (!ready_ || closed_.get() || closing_.get()) return 0
         val assignment = getAssignment(experimentName)
         if (!assignment.exposed.get()) {
             queueExposure(assignment)
@@ -150,12 +307,12 @@ class Context(
     }
 
     fun peekTreatment(experimentName: String): Int {
-        checkReady(true)
+        if (!ready_ || closed_.get() || closing_.get()) return 0
         return getAssignment(experimentName).variant
     }
 
     fun getVariableValue(key: String, defaultValue: Any?): Any? {
-        checkReady(true)
+        if (!ready_ || closed_.get() || closing_.get()) return defaultValue
         val assignment = getVariableAssignment(key)
         if (assignment != null && assignment.variables != null) {
             if (!assignment.exposed.get()) {
@@ -169,7 +326,7 @@ class Context(
     }
 
     fun peekVariableValue(key: String, defaultValue: Any?): Any? {
-        checkReady(true)
+        if (!ready_ || closed_.get() || closing_.get()) return defaultValue
         val assignment = getVariableAssignment(key)
         if (assignment != null && assignment.variables != null) {
             if (assignment.variables!!.containsKey(key)) {
@@ -180,6 +337,7 @@ class Context(
     }
 
     fun getCustomFieldValue(experimentName: String, key: String): Any? {
+        if (!ready_ || closed_.get() || closing_.get()) return null
         val experiment = index_[experimentName] ?: return null
         val field = experiment.data.customFieldValues?.find { it.name == key } ?: return null
         if (field.value == null) return null
@@ -205,6 +363,7 @@ class Context(
     }
 
     fun getCustomFieldValueType(experimentName: String, key: String): String? {
+        if (!ready_ || closed_.get() || closing_.get()) return null
         val experiment = index_[experimentName] ?: return null
         val field = experiment.data.customFieldValues?.find { it.name == key } ?: return null
         return field.type
@@ -222,31 +381,48 @@ class Context(
         logEvent(ContextEventLogger.EventType.Goal, achievement)
     }
 
-    fun publish() {
+    fun publish(): CompletableFuture<Void> {
         checkNotClosed()
-        flush()
+        return flush()
     }
 
-    fun close() {
-        if (!closed_ && !closing_) {
-            closing_ = true
-            if (pendingCount_.get() > 0) {
-                flush()
+    override fun close() {
+        if (!closed_.get() && closing_.compareAndSet(false, true)) {
+            try {
+                if (pendingCount_.get() > 0) {
+                    flush().join()
+                }
+                closed_.set(true)
+                logEvent(ContextEventLogger.EventType.Close, null)
+            } finally {
+                closing_.set(false)
             }
-            closed_ = true
-            closing_ = false
-            logEvent(ContextEventLogger.EventType.Close, null)
         }
+    }
+
+    @Deprecated("Use close() instead", ReplaceWith("close()"))
+    fun finalize() {
+        close()
     }
 
     fun setDataAndReady(newData: ContextData) {
         setData(newData)
         ready_ = true
+        readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
         logEvent(ContextEventLogger.EventType.Ready, newData)
     }
 
+    fun refresh(): CompletableFuture<Void> {
+        if (dataProvider == null) {
+            return CompletableFuture.completedFuture(null)
+        }
+        return dataProvider.getContextData().thenAccept { newData ->
+            setData(newData)
+            logEvent(ContextEventLogger.EventType.Refresh, newData)
+        }
+    }
+
     fun refresh(newData: ContextData) {
-        assignmentCache.clear()
         setData(newData)
         logEvent(ContextEventLogger.EventType.Refresh, newData)
     }
@@ -265,9 +441,9 @@ class Context(
                         val vars = objectMapper.readValue(variant.config, Map::class.java) as Map<String, Any?>
                         variantVariables.add(vars)
 
+                        val indexed = ContextExperiment(experiment, variantVariables)
                         for (key in vars.keys) {
                             val list = newVarIndex.getOrPut(key) { mutableListOf() }
-                            val indexed = ContextExperiment(experiment, variantVariables)
                             val existing = list.find { it.data.name == experiment.name }
                             if (existing == null) {
                                 val insertAt = list.indexOfFirst { it.data.id > experiment.id }
@@ -286,6 +462,30 @@ class Context(
 
         index_ = newIndex
         indexVariables_ = newVarIndex
+        ready_ = true
+
+        val iter = assignmentCache.iterator()
+        while (iter.hasNext()) {
+            val entry = iter.next()
+            val assignment = entry.value
+            val experiment = newIndex[entry.key]
+            if (experiment == null) {
+                if (assignment.assigned && !assignment.overridden) iter.remove()
+            } else if (!experimentMatches(experiment.data, assignment)) {
+                if (assignment.overridden) {
+                    continue
+                } else {
+                    iter.remove()
+                }
+            }
+        }
+    }
+
+    private fun setDataFailed(exception: Throwable) {
+        failed_ = true
+        readyError_ = exception
+        ready_ = true
+        logEvent(ContextEventLogger.EventType.Error, exception)
     }
 
     private fun getAssignment(experimentName: String): Assignment {
@@ -446,40 +646,60 @@ class Context(
         }
     }
 
-    private fun flush() {
-        if (pendingCount_.get() > 0) {
-            val exposureList = mutableListOf<Exposure>()
-            val goalList = mutableListOf<GoalAchievement>()
-
-            while (true) {
-                val e = exposures_.poll() ?: break
-                exposureList.add(e)
-            }
-            while (true) {
-                val g = achievements_.poll() ?: break
-                goalList.add(g)
-            }
-            pendingCount_.set(0)
-
-            val unitList = units.map { (type, uid) ->
-                Unit(type, String(getUnitHash(type, uid), Charsets.US_ASCII))
-            }
-
-            val attrList = synchronized(attributes_) {
-                if (attributes_.isEmpty()) null else attributes_.toList()
-            }
-
-            val event = PublishEvent(
-                hashed = true,
-                publishedAt = System.currentTimeMillis(),
-                units = unitList,
-                exposures = exposureList.ifEmpty { null },
-                goals = goalList.ifEmpty { null },
-                attributes = attrList
-            )
-
-            logEvent(ContextEventLogger.EventType.Publish, event)
+    private fun flush(): CompletableFuture<Void> {
+        if (pendingCount_.get() <= 0) {
+            return CompletableFuture.completedFuture(null)
         }
+
+        val exposureList = mutableListOf<Exposure>()
+        val goalList = mutableListOf<GoalAchievement>()
+
+        while (true) {
+            val e = exposures_.poll() ?: break
+            exposureList.add(e)
+        }
+        while (true) {
+            val g = achievements_.poll() ?: break
+            goalList.add(g)
+        }
+        val drained = exposureList.size + goalList.size
+        pendingCount_.addAndGet(-drained)
+
+        val unitList = units.map { (type, uid) ->
+            com.absmartly.sdk.Unit(type, String(getUnitHash(type, uid), Charsets.US_ASCII))
+        }
+
+        val attrList = synchronized(attributes_) {
+            if (attributes_.isEmpty()) null else attributes_.toList()
+        }
+
+        val event = PublishEvent(
+            hashed = true,
+            publishedAt = System.currentTimeMillis(),
+            units = unitList,
+            exposures = exposureList.ifEmpty { null },
+            goals = goalList.ifEmpty { null },
+            attributes = attrList
+        )
+
+        logEvent(ContextEventLogger.EventType.Publish, event)
+
+        if (eventHandler != null) {
+            return eventHandler.publish(this, event).whenComplete { _, exception ->
+                if (exception != null) {
+                    for (exposure in exposureList) {
+                        exposures_.add(exposure)
+                    }
+                    for (goal in goalList) {
+                        achievements_.add(goal)
+                    }
+                    pendingCount_.addAndGet(drained)
+                    logEvent(ContextEventLogger.EventType.Error, exception)
+                }
+            }
+        }
+
+        return CompletableFuture.completedFuture(null)
     }
 
     private fun getUnitHash(unitType: String, uid: String): ByteArray {
@@ -512,12 +732,12 @@ class Context(
     }
 
     private fun checkReady(expectNotClosed: Boolean) {
-        if (!ready_) throw IllegalStateException("ABSmartly Context is not yet ready")
+        if (!ready_) throw IllegalStateException("ABsmartly Context is not yet ready.")
         if (expectNotClosed) checkNotClosed()
     }
 
     private fun checkNotClosed() {
-        if (closed_) throw IllegalStateException("ABSmartly Context is closed")
-        if (closing_) throw IllegalStateException("ABSmartly Context is closing")
+        if (closed_.get()) throw IllegalStateException("ABsmartly Context is finalized.")
+        if (closing_.get()) throw IllegalStateException("ABsmartly Context is closing.")
     }
 }

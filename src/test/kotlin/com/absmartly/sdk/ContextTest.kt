@@ -239,6 +239,20 @@ class ContextTest {
         return Context(data, units, options, eventLogger)
     }
 
+    private fun createContextWithProvider(
+        data: ContextData = createContextData(),
+        refreshData: ContextData,
+        eventLogger: ContextEventLogger? = null
+    ): Context {
+        val provider = object : ContextDataProvider {
+            override fun getContextData(): java.util.concurrent.CompletableFuture<ContextData> =
+                java.util.concurrent.CompletableFuture.completedFuture(refreshData)
+        }
+        val config = ContextConfig.create().setUnits(units)
+        eventLogger?.let { config.setEventLogger(it) }
+        return Context.create(config, java.util.concurrent.CompletableFuture.completedFuture(data), provider, null, eventLogger, null)
+    }
+
     // --- State Tests ---
 
     @Test
@@ -589,12 +603,10 @@ class ContextTest {
     }
 
     @Test
-    fun closedContextThrowsOnGetTreatment() {
+    fun closedContextReturnsZeroForGetTreatment() {
         val context = createContext()
         context.close()
-        assertFailsWith<IllegalStateException> {
-            context.getTreatment("exp_test_ab")
-        }
+        assertEquals(0, context.getTreatment("exp_test_ab"))
     }
 
     @Test
@@ -634,12 +646,10 @@ class ContextTest {
     }
 
     @Test
-    fun closedContextThrowsOnSetOverride() {
+    fun closedContextAllowsSetOverride() {
         val context = createContext()
         context.close()
-        assertFailsWith<IllegalStateException> {
-            context.setOverride("exp", 1)
-        }
+        context.setOverride("exp", 1)
     }
 
     @Test
@@ -659,29 +669,48 @@ class ContextTest {
         assertTrue(context.isClosed)
     }
 
+    @Test
+    fun finalizeIsAliasForClose() {
+        val context = createContext()
+        assertFalse(context.isFinalized)
+        assertFalse(context.isFinalizing)
+        @Suppress("DEPRECATION")
+        context.finalize()
+        assertTrue(context.isFinalized)
+        assertTrue(context.isClosed)
+    }
+
+    @Test
+    fun isFinalizedReflectsClosedState() {
+        val context = createContext()
+        assertFalse(context.isFinalized)
+        context.close()
+        assertTrue(context.isFinalized)
+    }
+
     // --- Refresh ---
 
     @Test
     fun refreshUpdatesData() {
-        val context = createContext()
         val refreshData = createRefreshContextData()
-        context.refresh(refreshData)
+        val context = createContextWithProvider(refreshData = refreshData)
+        context.refresh().get()
         assertEquals(listOf("exp_test_new"), context.experiments)
     }
 
     @Test
     fun refreshClearsOldAssignments() {
-        val context = createContext()
+        val context = createContextWithProvider(refreshData = createRefreshContextData())
         assertEquals(1, context.getTreatment("exp_test_ab"))
-        context.refresh(createRefreshContextData())
+        context.refresh().get()
         assertEquals(0, context.getTreatment("exp_test_ab"))
     }
 
     @Test
     fun refreshNewExperimentTreatment() {
-        val context = createContext()
         val refreshData = createRefreshContextData()
-        context.refresh(refreshData)
+        val context = createContextWithProvider(refreshData = refreshData)
+        context.refresh().get()
         assertEquals(1, context.getTreatment("exp_test_new"))
     }
 
@@ -924,8 +953,8 @@ class ContextTest {
                 events.add(type to data)
             }
         }
-        val context = createContext(eventLogger = logger)
-        context.refresh(createRefreshContextData())
+        val context = createContextWithProvider(refreshData = createRefreshContextData(), eventLogger = logger)
+        context.refresh().get()
         assertTrue(events.any { it.first == ContextEventLogger.EventType.Refresh })
     }
 
@@ -975,5 +1004,188 @@ class ContextTest {
     fun treatmentReturnsZeroWhenUnitTypeMissing() {
         val context = createContext(units = mutableMapOf())
         assertEquals(0, context.getTreatment("exp_test_ab"))
+    }
+
+    // --- Publish error handling ---
+
+    @Test
+    fun publishKeepsEventsPendingOnFailure() {
+        val failure = RuntimeException("PUBLISH_FAILED")
+        val eventHandler = object : ContextPublisher {
+            override fun publish(context: Context, event: PublishEvent): java.util.concurrent.CompletableFuture<Void> {
+                val future = java.util.concurrent.CompletableFuture<Void>()
+                future.completeExceptionally(failure)
+                return future
+            }
+        }
+
+        val config = ContextConfig.create().setUnits(units)
+        val dataFuture = java.util.concurrent.CompletableFuture.completedFuture(createContextData())
+        val context = Context.create(config, dataFuture, null, eventHandler, null, null)
+        context.waitUntilReady()
+
+        context.track("goal1", mapOf("amount" to 125))
+        assertEquals(1, context.pendingCount)
+
+        val future = context.publish()
+        try {
+            future.get()
+        } catch (_: Exception) {}
+
+        assertEquals(1, context.pendingCount)
+    }
+
+    // --- Override after close ---
+
+    @Test
+    fun setOverrideSucceedsAfterClose() {
+        val context = createContext()
+        context.close()
+        assertTrue(context.isClosed)
+        context.setOverride("exp_test_ab", 2)
+    }
+
+    // --- readyError ---
+
+    @Test
+    fun readyErrorReturnsNullOnSuccess() {
+        val context = createContext()
+        assertNull(context.readyError())
+    }
+
+    @Test
+    fun readyErrorReturnsExceptionOnDataFailure() {
+        val exception = RuntimeException("data failed")
+        val f = java.util.concurrent.CompletableFuture<ContextData>()
+        f.completeExceptionally(exception)
+        val config = ContextConfig.create().setUnits(units)
+        val ctx = Context.create(config, f, null, null, null, null)
+        ctx.waitUntilReady()
+        assertTrue(ctx.isFailed)
+        assertNotNull(ctx.readyError())
+    }
+
+    // --- isClosing ---
+
+    @Test
+    fun isClosingReturnsFalseWhenNotClosing() {
+        val context = createContext()
+        assertFalse(context.isClosing)
+    }
+
+    @Test
+    fun isClosingReturnsFalseAfterClose() {
+        val context = createContext()
+        context.close()
+        assertFalse(context.isClosing)
+        assertTrue(context.isClosed)
+    }
+
+    // --- getUnits ---
+
+    @Test
+    fun getUnitsReturnsAllUnits() {
+        val context = createContext()
+        val result = context.getUnits()
+        assertEquals(units["session_id"], result["session_id"])
+        assertEquals(units["user_id"], result["user_id"])
+        assertEquals(units["email"], result["email"])
+    }
+
+    // --- getAttributes ---
+
+    @Test
+    fun getAttributesReturnsAllAttributes() {
+        val context = createContext()
+        context.setAttribute("key1", "val1")
+        context.setAttribute("key2", 42)
+        val result = context.getAttributes()
+        assertEquals("val1", result["key1"])
+        assertEquals(42, result["key2"])
+    }
+
+    @Test
+    fun getAttributesReturnsEmptyMapWhenNoAttributes() {
+        val context = createContext(units = mutableMapOf())
+        val result = context.getAttributes()
+        assertTrue(result.isEmpty())
+    }
+
+    // --- setUnits bulk setter ---
+
+    @Test
+    fun setUnitsBulkSetsAllUnits() {
+        val context = createContext(units = mutableMapOf())
+        context.setUnits(mapOf("user_id" to "abc", "email" to "test@test.com"))
+        assertEquals("abc", context.getUnit("user_id"))
+        assertEquals("test@test.com", context.getUnit("email"))
+    }
+
+    // --- setAttributes bulk setter ---
+
+    @Test
+    fun setAttributesBulkSetsAllAttributes() {
+        val context = createContext()
+        context.setAttributes(mapOf("k1" to "v1", "k2" to 99))
+        assertEquals("v1", context.getAttribute("k1"))
+        assertEquals(99, context.getAttribute("k2"))
+    }
+
+    // --- setOverrides bulk setter ---
+
+    @Test
+    fun setOverridesBulkSetsAllOverrides() {
+        val context = createContext()
+        context.setOverrides(mapOf("exp_test_ab" to 2, "exp_test_abc" to 1))
+        assertEquals(2, context.getTreatment("exp_test_ab"))
+        assertEquals(1, context.getTreatment("exp_test_abc"))
+    }
+
+    // --- setCustomAssignments bulk setter ---
+
+    @Test
+    fun setCustomAssignmentsBulkSetsAll() {
+        val context = createContext()
+        context.setCustomAssignments(mapOf("exp_test_ab" to 2))
+        assertEquals(2, context.getTreatment("exp_test_ab"))
+    }
+
+    // --- Returns defaults when not ready ---
+
+    @Test
+    fun returnsDefaultsWhenNotReady() {
+        val dataFuture = java.util.concurrent.CompletableFuture<ContextData>()
+        val config = ContextConfig.create().setUnits(units)
+        val context = Context.create(config, dataFuture, null, null, null, null)
+        assertFalse(context.isReady)
+
+        assertEquals(0, context.getTreatment("exp_test_ab"))
+        assertEquals(0, context.peekTreatment("exp_test_ab"))
+        assertEquals("default", context.getVariableValue("banner.border", "default"))
+        assertEquals("default", context.peekVariableValue("banner.border", "default"))
+        assertEquals(emptyList<String>(), context.experiments)
+        assertEquals(emptyMap<String, List<String>>(), context.variableKeys)
+        assertEquals(emptySet<String>(), context.customFieldKeys)
+        assertNull(context.getCustomFieldValue("exp_test_ab", "key"))
+        assertNull(context.getCustomFieldValueType("exp_test_ab", "key"))
+    }
+
+    // --- Returns defaults when closed ---
+
+    @Test
+    fun returnsDefaultsWhenClosed() {
+        val context = createContext()
+        context.close()
+        assertTrue(context.isClosed)
+
+        assertEquals(0, context.getTreatment("exp_test_ab"))
+        assertEquals(0, context.peekTreatment("exp_test_ab"))
+        assertEquals("default", context.getVariableValue("banner.border", "default"))
+        assertEquals("default", context.peekVariableValue("banner.border", "default"))
+        assertEquals(emptyList<String>(), context.experiments)
+        assertEquals(emptyMap<String, List<String>>(), context.variableKeys)
+        assertEquals(emptySet<String>(), context.customFieldKeys)
+        assertNull(context.getCustomFieldValue("exp_test_ab", "key"))
+        assertNull(context.getCustomFieldValueType("exp_test_ab", "key"))
     }
 }
