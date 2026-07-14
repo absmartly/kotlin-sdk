@@ -89,7 +89,7 @@ internal object JsonExpr {
                 val value = evaluate(args, vars)
                 value == null
             }
-            "eq" -> binaryOp(args, vars) { a, b -> compare(a, b) == 0 }
+            "eq" -> binaryOp(args, vars) { a, b -> if (a == null || b == null) null else compare(a, b) == 0 }
             "gt" -> binaryOp(args, vars) { a, b -> val c = compare(a, b); c != null && c > 0 }
             "gte" -> binaryOp(args, vars) { a, b -> val c = compare(a, b); c != null && c >= 0 }
             "lt" -> binaryOp(args, vars) { a, b -> val c = compare(a, b); c != null && c < 0 }
@@ -157,9 +157,9 @@ internal object JsonExpr {
         val nb = toNumber(b)
         if (na != null && nb != null) return na.compareTo(nb)
 
-        val sa = a.toString()
-        val sb = b.toString()
-        return sa.compareTo(sb)
+        if (a is String && b is String) return a.compareTo(b)
+
+        return null
     }
 
     private fun toNumber(v: Any?): Double? {

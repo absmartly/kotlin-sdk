@@ -31,21 +31,9 @@ internal object Buffers {
     }
 
     fun encodeUTF8(buf: ByteArray, offset: Int, value: CharSequence): Int {
-        var out = offset
-        for (i in 0 until value.length) {
-            val c = value[i].code
-            if (c < 0x80) {
-                buf[out++] = c.toByte()
-            } else if (c < 0x800) {
-                buf[out++] = ((c shr 6) or 192).toByte()
-                buf[out++] = ((c and 63) or 128).toByte()
-            } else {
-                buf[out++] = ((c shr 12) or 224).toByte()
-                buf[out++] = (((c shr 6) and 63) or 128).toByte()
-                buf[out++] = ((c and 63) or 128).toByte()
-            }
-        }
-        return out - offset
+        val bytes = value.toString().toByteArray(Charsets.UTF_8)
+        System.arraycopy(bytes, 0, buf, offset, bytes.size)
+        return bytes.size
     }
 }
 
@@ -236,12 +224,12 @@ internal object MD5 {
     }
 }
 
-internal object Hashing {
+object Hashing {
     private val threadBuffer = ThreadLocal.withInitial { ByteArray(512) }
 
     fun hashUnit(unit: CharSequence): ByteArray {
         val n = unit.length
-        val bufferLen = n shl 1
+        val bufferLen = n * 4
 
         var buffer = threadBuffer.get()
         if (buffer.size < bufferLen) {
