@@ -86,7 +86,9 @@ class Context private constructor(
                     context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
                     return@thenAccept
                 }
-                context.setData(data)
+                synchronized(context.refreshLock_) {
+                    if (context.appliedRefreshSeq_ == 0L) context.setData(data)
+                }
                 val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
                 rf?.complete(null)
                 context.logEvent(ContextEventLogger.EventType.Ready, data)
@@ -133,6 +135,7 @@ class Context private constructor(
     @Volatile private var publishTask_: ScheduledFuture<*>? = null
     @Volatile private var refreshTask_: ScheduledFuture<*>? = null
 
+    private val inFlight_: MutableSet<CompletableFuture<Void>> = ConcurrentHashMap.newKeySet()
     private val refreshSeq_ = java.util.concurrent.atomic.AtomicLong(0)
     private val refreshLock_ = Any()
     private var appliedRefreshSeq_ = 0L
@@ -440,7 +443,7 @@ class Context private constructor(
         wl.lock()
         try {
             // Taking the write lock waits for in-flight event producers; later ones see closing_.
-            won = closing_.compareAndSet(false, true)
+            won = !closed_.get() && closing_.compareAndSet(false, true)
         } finally {
             wl.unlock()
         }
@@ -452,9 +455,17 @@ class Context private constructor(
                     flush().join()
                 }
             } finally {
+                // Wait for publishes admitted before close so the client is not shut down under them.
+                for (f in inFlight_.toList()) {
+                    try {
+                        f.join()
+                    } catch (_: Exception) {
+                    }
+                }
                 // Close wins regardless of the final publish outcome; a failure still propagates to the caller.
+                // closing_ stays set: isClosing already reports false once closed_ is true, and keeping it
+                // set stops a late close() from winning the CAS again.
                 closed_.set(true)
-                closing_.set(false)
                 logEvent(ContextEventLogger.EventType.Close, null)
             }
         }
@@ -476,6 +487,7 @@ class Context private constructor(
         if (dataProvider == null) {
             return CompletableFuture.completedFuture(null)
         }
+        if (closed_.get() || closing_.get()) return CompletableFuture.completedFuture(null)
         val seq = refreshSeq_.incrementAndGet()
         return dataProvider.getContextData().thenAccept { newData ->
             applyRefresh(seq, newData)
@@ -483,13 +495,15 @@ class Context private constructor(
     }
 
     fun refresh(newData: ContextData) {
+        if (closed_.get() || closing_.get()) return
         applyRefresh(refreshSeq_.incrementAndGet(), newData)
     }
 
-    // Only the most recently requested refresh may win; older completions are dropped.
+    // Only the most recently requested refresh may win; older or post-close completions are dropped.
     private fun applyRefresh(seq: Long, newData: ContextData) {
         synchronized(refreshLock_) {
-            if (seq <= appliedRefreshSeq_) return
+            if (closed_.get() || closing_.get()) return
+            if (seq < refreshSeq_.get() || seq <= appliedRefreshSeq_) return
             appliedRefreshSeq_ = seq
             setData(newData)
         }
@@ -791,9 +805,12 @@ class Context private constructor(
                 requeue(e)
                 return CompletableFuture<Void>().also { it.completeExceptionally(e) }
             }
-            return future.whenComplete { _, exception ->
+            val tracked = future.whenComplete { _, exception ->
                 if (exception != null) requeue(exception)
             }
+            inFlight_.add(tracked)
+            tracked.whenComplete { _, _ -> inFlight_.remove(tracked) }
+            return tracked
         }
 
         return CompletableFuture.completedFuture(null)
