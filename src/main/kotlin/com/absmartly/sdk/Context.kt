@@ -98,7 +98,9 @@ class Context private constructor(
                     context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
                     return@exceptionally null
                 }
-                context.setDataFailed(exception)
+                synchronized(context.refreshLock_) {
+                    if (context.appliedRefreshSeq_ == 0L) context.setDataFailed(exception)
+                }
                 val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
                 rf?.complete(null)
                 context.startTimers()
@@ -158,6 +160,8 @@ class Context private constructor(
         var trafficSeedHi: Int = 0
         var trafficSeedLo: Int = 0
         var variantConfigs: List<String?> = emptyList()
+        var audience: String? = null
+        var audienceStrict: Boolean = false
         var variant: Int = 0
         var assigned: Boolean = false
         var overridden: Boolean = false
@@ -668,6 +672,8 @@ class Context private constructor(
                 assignment.trafficSeedHi = experiment.data.trafficSeedHi
                 assignment.trafficSeedLo = experiment.data.trafficSeedLo
                 assignment.variantConfigs = experiment.data.variants.map { it.config }
+                assignment.audience = experiment.data.audience
+                assignment.audienceStrict = experiment.data.audienceStrict
                 assignment.fullOnVariant = experiment.data.fullOnVariant
                 assignment.attrsSeq = attrsSeq_.get()
             }
@@ -704,7 +710,9 @@ class Context private constructor(
                 experiment.seedHi == assignment.seedHi && experiment.seedLo == assignment.seedLo &&
                 experiment.trafficSeedHi == assignment.trafficSeedHi &&
                 experiment.trafficSeedLo == assignment.trafficSeedLo &&
-                experiment.variants.map { it.config } == assignment.variantConfigs
+                experiment.variants.map { it.config } == assignment.variantConfigs &&
+                experiment.audience == assignment.audience &&
+                experiment.audienceStrict == assignment.audienceStrict
     }
 
     private fun audienceMatches(experiment: Experiment, assignment: Assignment): Boolean {
