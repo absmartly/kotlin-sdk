@@ -137,6 +137,7 @@ class Context private constructor(
     @Volatile private var publishTask_: ScheduledFuture<*>? = null
     @Volatile private var refreshTask_: ScheduledFuture<*>? = null
 
+    @Volatile private var scheduledRefresh_: CompletableFuture<Void>? = null
     private val inFlight_: MutableSet<CompletableFuture<Void>> = ConcurrentHashMap.newKeySet()
     private val refreshSeq_ = java.util.concurrent.atomic.AtomicLong(0)
     private val refreshLock_ = Any()
@@ -205,8 +206,18 @@ class Context private constructor(
             if (refreshInterval > 0) {
                 refreshTask_ = sched.scheduleWithFixedDelay({
                     try {
-                        if (!closed_.get() && !closing_.get()) refresh()
-                    } catch (_: Exception) {
+                        if (!closed_.get() && !closing_.get()) {
+                            val prev = scheduledRefresh_
+                            if (prev == null || prev.isDone) {
+                                val f = refresh()
+                                scheduledRefresh_ = f
+                                f.whenComplete { _, ex ->
+                                    if (ex != null) logEvent(ContextEventLogger.EventType.Error, ex)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        logEvent(ContextEventLogger.EventType.Error, e)
                     }
                 }, refreshInterval, refreshInterval, TimeUnit.MILLISECONDS)
             }
@@ -510,6 +521,7 @@ class Context private constructor(
             if (seq < refreshSeq_.get() || seq <= appliedRefreshSeq_) return
             appliedRefreshSeq_ = seq
             setData(newData)
+            readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
         }
         logEvent(ContextEventLogger.EventType.Refresh, newData)
     }
@@ -762,6 +774,24 @@ class Context private constructor(
         if (pendingCount_.get() <= 0) {
             return CompletableFuture.completedFuture(null)
         }
+        // Registered before draining so close() can never miss a publish that has drained but not yet returned.
+        val placeholder = CompletableFuture<Void>()
+        inFlight_.add(placeholder)
+        placeholder.whenComplete { _, _ -> inFlight_.remove(placeholder) }
+        try {
+            return flushInternal().also { f ->
+                f.whenComplete { _, ex -> if (ex != null) placeholder.completeExceptionally(ex) else placeholder.complete(null) }
+            }
+        } catch (e: Throwable) {
+            placeholder.completeExceptionally(e)
+            throw e
+        }
+    }
+
+    private fun flushInternal(): CompletableFuture<Void> {
+        if (pendingCount_.get() <= 0) {
+            return CompletableFuture.completedFuture(null)
+        }
 
         val exposureList = mutableListOf<Exposure>()
         val goalList = mutableListOf<GoalAchievement>()
@@ -816,8 +846,6 @@ class Context private constructor(
             val tracked = future.whenComplete { _, exception ->
                 if (exception != null) requeue(exception)
             }
-            inFlight_.add(tracked)
-            tracked.whenComplete { _, _ -> inFlight_.remove(tracked) }
             return tracked
         }
 
