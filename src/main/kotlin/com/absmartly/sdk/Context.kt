@@ -133,6 +133,10 @@ class Context private constructor(
     @Volatile private var publishTask_: ScheduledFuture<*>? = null
     @Volatile private var refreshTask_: ScheduledFuture<*>? = null
 
+    private val refreshSeq_ = java.util.concurrent.atomic.AtomicLong(0)
+    private val refreshLock_ = Any()
+    private var appliedRefreshSeq_ = 0L
+
     private val attrsSeq_ = AtomicInteger(0)
     private val pendingCount_ = AtomicInteger(0)
 
@@ -145,6 +149,12 @@ class Context private constructor(
         var name: String = ""
         var unitType: String? = null
         var trafficSplit: DoubleArray = doubleArrayOf()
+        var split: DoubleArray = doubleArrayOf()
+        var seedHi: Int = 0
+        var seedLo: Int = 0
+        var trafficSeedHi: Int = 0
+        var trafficSeedLo: Int = 0
+        var variantConfigs: List<String?> = emptyList()
         var variant: Int = 0
         var assigned: Boolean = false
         var overridden: Boolean = false
@@ -441,10 +451,11 @@ class Context private constructor(
                 if (pendingCount_.get() > 0) {
                     flush().join()
                 }
-                closed_.set(true)
-                logEvent(ContextEventLogger.EventType.Close, null)
             } finally {
+                // Close wins regardless of the final publish outcome; a failure still propagates to the caller.
+                closed_.set(true)
                 closing_.set(false)
+                logEvent(ContextEventLogger.EventType.Close, null)
             }
         }
     }
@@ -465,14 +476,23 @@ class Context private constructor(
         if (dataProvider == null) {
             return CompletableFuture.completedFuture(null)
         }
+        val seq = refreshSeq_.incrementAndGet()
         return dataProvider.getContextData().thenAccept { newData ->
-            setData(newData)
-            logEvent(ContextEventLogger.EventType.Refresh, newData)
+            applyRefresh(seq, newData)
         }
     }
 
     fun refresh(newData: ContextData) {
-        setData(newData)
+        applyRefresh(refreshSeq_.incrementAndGet(), newData)
+    }
+
+    // Only the most recently requested refresh may win; older completions are dropped.
+    private fun applyRefresh(seq: Long, newData: ContextData) {
+        synchronized(refreshLock_) {
+            if (seq <= appliedRefreshSeq_) return
+            appliedRefreshSeq_ = seq
+            setData(newData)
+        }
         logEvent(ContextEventLogger.EventType.Refresh, newData)
     }
 
@@ -628,6 +648,12 @@ class Context private constructor(
                 assignment.id = experiment.data.id
                 assignment.iteration = experiment.data.iteration
                 assignment.trafficSplit = experiment.data.trafficSplit
+                assignment.split = experiment.data.split
+                assignment.seedHi = experiment.data.seedHi
+                assignment.seedLo = experiment.data.seedLo
+                assignment.trafficSeedHi = experiment.data.trafficSeedHi
+                assignment.trafficSeedLo = experiment.data.trafficSeedLo
+                assignment.variantConfigs = experiment.data.variants.map { it.config }
                 assignment.fullOnVariant = experiment.data.fullOnVariant
                 assignment.attrsSeq = attrsSeq_.get()
             }
@@ -659,7 +685,12 @@ class Context private constructor(
                 experiment.unitType != null && experiment.unitType == assignment.unitType &&
                 experiment.iteration == assignment.iteration &&
                 experiment.fullOnVariant == assignment.fullOnVariant &&
-                experiment.trafficSplit.contentEquals(assignment.trafficSplit)
+                experiment.trafficSplit.contentEquals(assignment.trafficSplit) &&
+                experiment.split.contentEquals(assignment.split) &&
+                experiment.seedHi == assignment.seedHi && experiment.seedLo == assignment.seedLo &&
+                experiment.trafficSeedHi == assignment.trafficSeedHi &&
+                experiment.trafficSeedLo == assignment.trafficSeedLo &&
+                experiment.variants.map { it.config } == assignment.variantConfigs
     }
 
     private fun audienceMatches(experiment: Experiment, assignment: Assignment): Boolean {
