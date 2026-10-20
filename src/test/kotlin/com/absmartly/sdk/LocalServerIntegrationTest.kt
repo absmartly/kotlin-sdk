@@ -81,6 +81,13 @@ class LocalServerIntegrationTest {
         }
     }
 
+    private var sdk: ABsmartly? = null
+
+    @AfterTest
+    fun closeSdk() {
+        sdk?.close()
+    }
+
     @Test
     fun performsRealGetAndPutContext() {
         val sdk = ABsmartly.builder()
@@ -89,6 +96,7 @@ class LocalServerIntegrationTest {
             .application("website")
             .environment("dev")
             .build()
+        this.sdk = sdk
 
         val contextConfig = ContextConfig.create()
             .setUnit("user_id", "123456789")
@@ -139,6 +147,5 @@ class LocalServerIntegrationTest {
         assertTrue(node.get("goals").size() > 0)
         assertEquals("payment", node.get("goals").get(0).get("name").asText())
 
-        sdk.close()
     }
 }

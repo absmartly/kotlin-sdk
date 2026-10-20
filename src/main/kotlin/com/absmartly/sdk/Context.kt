@@ -6,6 +6,9 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantReadWriteLock
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -76,34 +79,22 @@ class Context private constructor(
                 context.setAttribute(k, v)
             }
 
-            if (dataFuture.isDone) {
-                val readyFuture = CompletableFuture<Void>()
-                context.readyFuture_.set(readyFuture)
-                dataFuture.thenAccept { data ->
-                    context.setData(data)
-                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
-                    rf?.complete(null)
-                    context.logEvent(ContextEventLogger.EventType.Ready, data)
-                }.exceptionally { exception ->
-                    context.setDataFailed(exception)
-                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
-                    rf?.complete(null)
-                    null
-                }
-            } else {
-                val readyFuture = CompletableFuture<Void>()
-                context.readyFuture_.set(readyFuture)
-                dataFuture.thenAccept { data ->
-                    context.setData(data)
-                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
-                    rf?.complete(null)
-                    context.logEvent(ContextEventLogger.EventType.Ready, data)
-                }.exceptionally { exception ->
-                    context.setDataFailed(exception)
-                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
-                    rf?.complete(null)
-                    null
-                }
+            val readyFuture = CompletableFuture<Void>()
+            context.readyFuture_.set(readyFuture)
+            dataFuture.thenAccept { data ->
+                if (context.closed_.get() || context.closing_.get()) return@thenAccept
+                context.setData(data)
+                val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                rf?.complete(null)
+                context.logEvent(ContextEventLogger.EventType.Ready, data)
+                context.startTimers()
+            }.exceptionally { exception ->
+                if (context.closed_.get() || context.closing_.get()) return@exceptionally null
+                context.setDataFailed(exception)
+                val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                rf?.complete(null)
+                context.startTimers()
+                null
             }
 
             return context
@@ -131,6 +122,10 @@ class Context private constructor(
     @Volatile private var readyError_: Throwable? = null
     private val closed_ = AtomicBoolean(false)
     private val closing_ = AtomicBoolean(false)
+
+    private val lifecycleLock_ = ReentrantReadWriteLock()
+    @Volatile private var publishTask_: ScheduledFuture<*>? = null
+    @Volatile private var refreshTask_: ScheduledFuture<*>? = null
 
     private val attrsSeq_ = AtomicInteger(0)
     private val pendingCount_ = AtomicInteger(0)
@@ -171,6 +166,36 @@ class Context private constructor(
     val pendingCount: Int get() = pendingCount_.get()
 
     fun readyError(): Throwable? = readyError_
+
+    private fun startTimers() {
+        val sched = scheduler ?: return
+        synchronized(this) {
+            if (closed_.get() || closing_.get() || publishTask_ != null || refreshTask_ != null) return
+            if (publishDelay > 0) {
+                publishTask_ = sched.scheduleWithFixedDelay({
+                    try {
+                        if (!closed_.get() && !closing_.get() && pendingCount_.get() > 0) flush()
+                    } catch (_: Exception) {
+                    }
+                }, publishDelay, publishDelay, TimeUnit.MILLISECONDS)
+            }
+            if (refreshInterval > 0) {
+                refreshTask_ = sched.scheduleWithFixedDelay({
+                    try {
+                        if (!closed_.get() && !closing_.get()) refresh()
+                    } catch (_: Exception) {
+                    }
+                }, refreshInterval, refreshInterval, TimeUnit.MILLISECONDS)
+            }
+        }
+    }
+
+    private fun stopTimers() {
+        synchronized(this) {
+            publishTask_?.cancel(false)
+            refreshTask_?.cancel(false)
+        }
+    }
 
     fun getUnits(): Map<String, String> = HashMap(units)
 
@@ -370,14 +395,20 @@ class Context private constructor(
     }
 
     fun track(goalName: String, properties: Map<String, Any?>?) {
-        checkNotClosed()
         val achievement = GoalAchievement(
             name = goalName,
             achievedAt = System.currentTimeMillis(),
             properties = properties?.let { java.util.TreeMap(it) }
         )
-        achievements_.add(achievement)
-        pendingCount_.incrementAndGet()
+        val lock = lifecycleLock_.readLock()
+        lock.lock()
+        try {
+            checkNotClosed()
+            achievements_.add(achievement)
+            pendingCount_.incrementAndGet()
+        } finally {
+            lock.unlock()
+        }
         logEvent(ContextEventLogger.EventType.Goal, achievement)
     }
 
@@ -387,7 +418,18 @@ class Context private constructor(
     }
 
     override fun close() {
-        if (!closed_.get() && closing_.compareAndSet(false, true)) {
+        if (closed_.get()) return
+        val wl = lifecycleLock_.writeLock()
+        val won: Boolean
+        wl.lock()
+        try {
+            // Taking the write lock waits for in-flight event producers; later ones see closing_.
+            won = closing_.compareAndSet(false, true)
+        } finally {
+            wl.unlock()
+        }
+        if (won) {
+            stopTimers()
             try {
                 if (pendingCount_.get() > 0) {
                     flush().join()
@@ -462,6 +504,8 @@ class Context private constructor(
 
         index_ = newIndex
         indexVariables_ = newVarIndex
+        failed_ = false
+        readyError_ = null
         ready_ = true
 
         val iter = assignmentCache.iterator()
@@ -626,7 +670,12 @@ class Context private constructor(
     }
 
     private fun queueExposure(assignment: Assignment) {
-        if (assignment.exposed.compareAndSet(false, true)) {
+        val lock = lifecycleLock_.readLock()
+        var publishedExposure: Exposure? = null
+        lock.lock()
+        try {
+            if (closed_.get() || closing_.get()) return
+            if (!assignment.exposed.compareAndSet(false, true)) return
             val exposure = Exposure(
                 id = assignment.id,
                 name = assignment.name,
@@ -642,8 +691,11 @@ class Context private constructor(
             )
             exposures_.add(exposure)
             pendingCount_.incrementAndGet()
-            logEvent(ContextEventLogger.EventType.Exposure, exposure)
+            publishedExposure = exposure
+        } finally {
+            lock.unlock()
         }
+        logEvent(ContextEventLogger.EventType.Exposure, publishedExposure)
     }
 
     private fun flush(): CompletableFuture<Void> {
@@ -685,17 +737,24 @@ class Context private constructor(
         logEvent(ContextEventLogger.EventType.Publish, event)
 
         if (eventHandler != null) {
-            return eventHandler.publish(this, event).whenComplete { _, exception ->
-                if (exception != null) {
-                    for (exposure in exposureList) {
-                        exposures_.add(exposure)
-                    }
-                    for (goal in goalList) {
-                        achievements_.add(goal)
-                    }
-                    pendingCount_.addAndGet(drained)
-                    logEvent(ContextEventLogger.EventType.Error, exception)
+            val requeue = { exception: Throwable ->
+                for (exposure in exposureList) {
+                    exposures_.add(exposure)
                 }
+                for (goal in goalList) {
+                    achievements_.add(goal)
+                }
+                pendingCount_.addAndGet(drained)
+                logEvent(ContextEventLogger.EventType.Error, exception)
+            }
+            val future = try {
+                eventHandler.publish(this, event)
+            } catch (e: Exception) {
+                requeue(e)
+                return CompletableFuture<Void>().also { it.completeExceptionally(e) }
+            }
+            return future.whenComplete { _, exception ->
+                if (exception != null) requeue(exception)
             }
         }
 

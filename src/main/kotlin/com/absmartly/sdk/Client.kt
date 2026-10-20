@@ -90,7 +90,9 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
                     }
                 }
             } else {
-                dataFuture.completeExceptionally(Exception(response.statusMessage))
+                dataFuture.completeExceptionally(
+                    Exception("HTTP $code: ${response.statusMessage} - ${String(response.content ?: ByteArray(0))}")
+                )
             }
         }.exceptionally { exception ->
             dataFuture.completeExceptionally(exception)
@@ -116,7 +118,9 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
             if (code / 100 == 2) {
                 publishFuture.complete(null)
             } else {
-                publishFuture.completeExceptionally(Exception(response.statusMessage))
+                publishFuture.completeExceptionally(
+                    Exception("HTTP $code: ${response.statusMessage} - ${String(response.content ?: ByteArray(0))}")
+                )
             }
         }.exceptionally { exception ->
             publishFuture.completeExceptionally(exception)
