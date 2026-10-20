@@ -82,14 +82,20 @@ class Context private constructor(
             val readyFuture = CompletableFuture<Void>()
             context.readyFuture_.set(readyFuture)
             dataFuture.thenAccept { data ->
-                if (context.closed_.get() || context.closing_.get()) return@thenAccept
+                if (context.closed_.get() || context.closing_.get()) {
+                    context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
+                    return@thenAccept
+                }
                 context.setData(data)
                 val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
                 rf?.complete(null)
                 context.logEvent(ContextEventLogger.EventType.Ready, data)
                 context.startTimers()
             }.exceptionally { exception ->
-                if (context.closed_.get() || context.closing_.get()) return@exceptionally null
+                if (context.closed_.get() || context.closing_.get()) {
+                    context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
+                    return@exceptionally null
+                }
                 context.setDataFailed(exception)
                 val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
                 rf?.complete(null)
@@ -430,6 +436,7 @@ class Context private constructor(
         }
         if (won) {
             stopTimers()
+            readyFuture_.get()?.let { if (!it.isDone) it.complete(null) }
             try {
                 if (pendingCount_.get() > 0) {
                     flush().join()
