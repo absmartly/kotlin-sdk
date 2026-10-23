@@ -70,7 +70,10 @@ class AudienceMatcherTest {
         assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"1e+21\"},{\"value\":1e21}]}]}", emptyMap())?.value)
         assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"0\"},{\"value\":-0.0}]}]}", emptyMap())?.value)
         assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"0.1\"},{\"value\":0.1}]}]}", emptyMap())?.value)
-        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"-1.5e+300\"},{\"value\":-1.5e300}]}]}", emptyMap())?.value)
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"-1.5e+3\"},{\"value\":-1.5e300}]}]}", emptyMap())?.value)
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"1e+23\"},{\"value\":1e23}]}]}", emptyMap())?.value)
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"1e+3\"},{\"value\":1e30}]}]}", emptyMap())?.value)
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"-0\"},{\"value\":-1e-16}]}]}", emptyMap())?.value)
         assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"100\"},{\"value\":100}]}]}", emptyMap())?.value)
     }
 

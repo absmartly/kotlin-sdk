@@ -46,9 +46,9 @@ class JsonExprCompareTest {
 
     @Test
     fun compareDifferentListsReturnsNullInEquality() {
-        val audience = """{"filter":[{"eq":[{"value":[1]},{"value":[2]}]}]}"""
+        val audience = """{"filter":[{"null":{"eq":[{"value":[1]},{"value":[2]}]}}]}"""
         val result = matcher.evaluate(audience, emptyMap())
-        assertEquals(false, result?.value)
+        assertEquals(true, result?.value)
     }
 
     @Test

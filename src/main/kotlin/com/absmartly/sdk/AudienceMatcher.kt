@@ -36,18 +36,26 @@ internal object JsonExpr {
         val d = n.toDouble()
         if (d.isNaN()) return "NaN"
         if (d.isInfinite()) return if (d > 0) "Infinity" else "-Infinity"
-        if (Math.abs(d) >= 1e21) return jsExponential(d)
-        val fixed = java.math.BigDecimal(d).setScale(15, java.math.RoundingMode.HALF_UP)
-        val str = (if (fixed.signum() == 0) java.math.BigDecimal.ZERO.setScale(15) else fixed).toPlainString()
-        return str.replace(Regex("\\.?0{0,15}$"), "")
+        val abs = Math.abs(d)
+        val body = if (abs >= 1e21) jsExponential(abs) else {
+            java.math.BigDecimal(abs).setScale(15, java.math.RoundingMode.HALF_UP).toPlainString()
+        }
+        return ((if (d < 0) "-" else "") + body).replace(Regex("\\.?0{0,15}$"), "")
     }
 
-    private fun jsExponential(d: Double): String {
-        val bd = java.math.BigDecimal(d.toString()).stripTrailingZeros()
-        val digits = bd.unscaledValue().abs().toString()
+    // Shortest round-trip digits; JDK 11 Double.toString is not always shortest.
+    private fun jsExponential(abs: Double): String {
+        val exact = java.math.BigDecimal(abs)
+        var bd = exact
+        for (p in 1..17) {
+            bd = exact.round(java.math.MathContext(p, java.math.RoundingMode.HALF_EVEN))
+            if (bd.toDouble() == abs) break
+        }
+        bd = bd.stripTrailingZeros()
+        val digits = bd.unscaledValue().toString()
         val exp = digits.length - 1 - bd.scale()
         val mantissa = if (digits.length > 1) digits[0] + "." + digits.substring(1) else digits
-        return (if (d < 0) "-" else "") + mantissa + "e+" + exp
+        return mantissa + "e+" + exp
     }
 
     fun evaluateBooleanExpr(expr: Any?, vars: Map<String, Any?>): Boolean {
