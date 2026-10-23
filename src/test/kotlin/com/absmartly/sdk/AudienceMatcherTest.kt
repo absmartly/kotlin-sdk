@@ -64,4 +64,20 @@ class AudienceMatcherTest {
         assertEquals(true, matcher.evaluate(audience, mapOf("country" to "GB"))?.value)
         assertEquals(false, matcher.evaluate(audience, mapOf("country" to "DE"))?.value)
     }
+
+    @Test
+    fun numberToStringMatchesJavaScript() {
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"1e+21\"},{\"value\":1e21}]}]}", emptyMap())?.value)
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"0\"},{\"value\":-0.0}]}]}", emptyMap())?.value)
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"0.1\"},{\"value\":0.1}]}]}", emptyMap())?.value)
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"-1.5e+300\"},{\"value\":-1.5e300}]}]}", emptyMap())?.value)
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":\"100\"},{\"value\":100}]}]}", emptyMap())?.value)
+    }
+
+    @Test
+    fun deepEqualityComparesNestedNumbersByValue() {
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":[1]},{\"value\":[1.0]}]}]}", emptyMap())?.value)
+        assertEquals(true, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":{\"a\":[2]}},{\"value\":{\"a\":[2.0]}}]}]}", emptyMap())?.value)
+        assertEquals(false, matcher.evaluate("{\"filter\":[{\"eq\":[{\"value\":[1]},{\"value\":[2]}]}]}", emptyMap())?.value)
+    }
 }

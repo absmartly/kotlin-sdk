@@ -291,7 +291,7 @@ class Context private constructor(
 
     val experiments: List<String>
         get() {
-            checkReady(true)
+            checkReady(false)
             return data.experiments.map { it.name }
         }
 

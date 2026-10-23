@@ -6,7 +6,7 @@ No version bump: the SDK has never been released (no tags, nothing published), s
 
 ### BREAKING
 
-- Reads before the context is ready or after close now throw `IllegalStateException`, matching the JavaScript SDK (`_checkReady`). Affected: `getTreatment`, `peekTreatment`, `getVariableValue`, `peekVariableValue`, `variableKeys`, `experiments`, `customFieldKeys`, `getCustomFieldValue`, `getCustomFieldValueType`.
+- Reads before the context is ready or after close now throw `IllegalStateException`, matching the JavaScript SDK (`_checkReady`). Affected: `getTreatment`, `peekTreatment`, `getVariableValue`, `peekVariableValue`, `variableKeys`, `customFieldKeys`, `getCustomFieldValue`, `getCustomFieldValueType`. `experiments` only requires ready and stays available after close.
   - Old (this PR branch): returned defaults (`0`, the default value, empty collections, `null`).
   - New: throws, with the messages below.
 - Error messages now match JavaScript casing and wording:

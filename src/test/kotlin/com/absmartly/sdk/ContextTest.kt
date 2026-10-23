@@ -1158,7 +1158,6 @@ class ContextTest {
             { context.peekTreatment("exp_test_ab") },
             { context.getVariableValue("banner.border", "default") },
             { context.peekVariableValue("banner.border", "default") },
-            { context.experiments },
             { context.variableKeys },
             { context.customFieldKeys },
             { context.getCustomFieldValue("exp_test_ab", "key") },
@@ -1177,6 +1176,8 @@ class ContextTest {
         val context = Context.create(config, dataFuture, null, null, null, null)
         assertFalse(context.isReady)
         assertAllReadsThrow(context, "ABsmartly Context is not yet ready.")
+        val e = assertFailsWith<IllegalStateException> { context.experiments }
+        assertEquals("ABsmartly Context is not yet ready.", e.message)
     }
 
     @Test
@@ -1185,5 +1186,6 @@ class ContextTest {
         context.close()
         assertTrue(context.isClosed)
         assertAllReadsThrow(context, "ABsmartly Context is finalized.")
+        assertTrue(context.experiments.isNotEmpty())
     }
 }

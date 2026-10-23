@@ -31,13 +31,23 @@ internal class AudienceMatcher {
 // results match across SDKs: binary operators yield null when either operand is null, and
 // compare() converts the right operand to the left operand's type.
 internal object JsonExpr {
-    private val numberFormat = ThreadLocal.withInitial {
-        java.text.DecimalFormat("#", java.text.DecimalFormatSymbols(java.util.Locale.ROOT)).apply {
-            maximumFractionDigits = 15
-            minimumFractionDigits = 0
-            minimumIntegerDigits = 1
-            isGroupingUsed = false
-        }
+    // JS: x.toFixed(15).replace(/\.?0{0,15}$/, ""); toFixed falls back to String(x) for |x| >= 1e21.
+    private fun numberToString(n: Number): String {
+        val d = n.toDouble()
+        if (d.isNaN()) return "NaN"
+        if (d.isInfinite()) return if (d > 0) "Infinity" else "-Infinity"
+        if (Math.abs(d) >= 1e21) return jsExponential(d)
+        val fixed = java.math.BigDecimal(d).setScale(15, java.math.RoundingMode.HALF_UP)
+        val str = (if (fixed.signum() == 0) java.math.BigDecimal.ZERO.setScale(15) else fixed).toPlainString()
+        return str.replace(Regex("\\.?0{0,15}$"), "")
+    }
+
+    private fun jsExponential(d: Double): String {
+        val bd = java.math.BigDecimal(d.toString()).stripTrailingZeros()
+        val digits = bd.unscaledValue().abs().toString()
+        val exp = digits.length - 1 - bd.scale()
+        val mantissa = if (digits.length > 1) digits[0] + "." + digits.substring(1) else digits
+        return (if (d < 0) "-" else "") + mantissa + "e+" + exp
     }
 
     fun evaluateBooleanExpr(expr: Any?, vars: Map<String, Any?>): Boolean {
@@ -144,9 +154,20 @@ internal object JsonExpr {
             is String -> stringConvert(b)?.let { a.compareTo(it) }
             is Boolean -> a.compareTo(booleanConvert(b))
             else -> if ((a is List<*> && b is List<*>) || (a is Map<*, *> && b is Map<*, *>)) {
-                if (a == b) 0 else null
+                if (deepEquals(a, b)) 0 else null
             } else null
         }
+    }
+
+    private fun deepEquals(a: Any?, b: Any?): Boolean {
+        if (a is Number && b is Number) return a.toDouble() == b.toDouble()
+        if (a is List<*> && b is List<*>) {
+            return a.size == b.size && a.indices.all { deepEquals(a[it], b[it]) }
+        }
+        if (a is Map<*, *> && b is Map<*, *>) {
+            return a.size == b.size && a.all { (k, v) -> b.containsKey(k) && deepEquals(v, b[k]) }
+        }
+        return a == b
     }
 
     private fun numberConvert(v: Any?): Double? {
@@ -166,7 +187,7 @@ internal object JsonExpr {
         return when (v) {
             is String -> v
             is Boolean -> v.toString()
-            is Number -> numberFormat.get().format(v)
+            is Number -> numberToString(v)
             else -> null
         }
     }
