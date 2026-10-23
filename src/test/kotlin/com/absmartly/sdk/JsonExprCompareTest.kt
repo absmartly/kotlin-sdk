@@ -37,8 +37,16 @@ class JsonExprCompareTest {
     }
 
     @Test
-    fun compareListVsListReturnsNullInEquality() {
+    fun compareDeepEqualListsIsEqualLikeJs() {
+        // JS compare(): non-primitive operands are equal (0) when deep-equal.
         val audience = """{"filter":[{"eq":[{"value":[1]},{"value":[1]}]}]}"""
+        val result = matcher.evaluate(audience, emptyMap())
+        assertEquals(true, result?.value)
+    }
+
+    @Test
+    fun compareDifferentListsReturnsNullInEquality() {
+        val audience = """{"filter":[{"eq":[{"value":[1]},{"value":[2]}]}]}"""
         val result = matcher.evaluate(audience, emptyMap())
         assertEquals(false, result?.value)
     }

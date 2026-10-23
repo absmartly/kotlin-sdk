@@ -30,10 +30,17 @@ internal object Buffers {
         return buf[offset].toInt() and 0xff
     }
 
+    // String.toByteArray(UTF_8) turns a lone surrogate into '?'; like JavaScript's TextEncoder,
+    // it must become U+FFFD (EF BF BD) so unit hashes agree across SDKs.
     fun encodeUTF8(buf: ByteArray, offset: Int, value: CharSequence): Int {
-        val bytes = value.toString().toByteArray(Charsets.UTF_8)
-        System.arraycopy(bytes, 0, buf, offset, bytes.size)
-        return bytes.size
+        val encoder = Charsets.UTF_8.newEncoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
+            .replaceWith(byteArrayOf(0xEF.toByte(), 0xBF.toByte(), 0xBD.toByte()))
+        val bytes = encoder.encode(java.nio.CharBuffer.wrap(value))
+        val len = bytes.remaining()
+        bytes.get(buf, offset, len)
+        return len
     }
 }
 

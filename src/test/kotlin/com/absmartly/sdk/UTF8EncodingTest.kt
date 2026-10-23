@@ -87,6 +87,50 @@ class UTF8EncodingTest {
         assertEquals(22, hash.size)
     }
 
+    // Shared cross-SDK vectors (validated against the JavaScript SDK's stringToUint8Array/hashUnit).
+    private val vectors = listOf(
+        Triple("user😀id", intArrayOf(117, 115, 101, 114, 240, 159, 152, 128, 105, 100), "nnPMxN6wY36LGRnuJ6jZrw"),
+        Triple("😀", intArrayOf(240, 159, 152, 128), "KgLqw51xanDs83V5GFkntg"),
+        Triple("𠀋", intArrayOf(240, 160, 128, 139), "8mWvgvNGn-DZqb6Ft0HVjA"),
+        Triple("a€𝄞z", intArrayOf(97, 226, 130, 172, 240, 157, 132, 158, 122), "AGGq8R9K1XjO77q33izhLg"),
+        Triple("🇵🇹", intArrayOf(240, 159, 135, 181, 240, 159, 135, 185), "1RRpVphazpblARsm5DaSkg"),
+        // A lone surrogate encodes as U+FFFD (EF BF BD), as TextEncoder does.
+        Triple("ab\uD83Dcd", intArrayOf(97, 98, 239, 191, 189, 99, 100), "jvDxBUzS9Tdsml3QQStWSg"),
+    )
+
+    @Test
+    fun encodeUTF8MatchesCrossSdkVectors() {
+        for ((value, expected, _) in vectors) {
+            val buf = ByteArray(value.length * 4)
+            val len = Buffers.encodeUTF8(buf, 0, value)
+            val actual = buf.copyOf(len).map { it.toInt() and 0xff }
+            assertEquals(expected.toList(), actual, "utf8 bytes for ${value.map { "%04x".format(it.code) }}")
+        }
+    }
+
+    @Test
+    fun hashUnitMatchesCrossSdkVectors() {
+        for ((value, _, hash) in vectors) {
+            assertEquals(hash, String(Hashing.hashUnit(value), Charsets.US_ASCII))
+        }
+    }
+
+    @Test
+    fun encodeUTF8ReplacesLoneLowSurrogateAndTrailingHighSurrogate() {
+        val buf = ByteArray(32)
+        val len = Buffers.encodeUTF8(buf, 0, "a\uDC00b\uD800")
+        assertEquals(listOf(97, 239, 191, 189, 98, 239, 191, 189), buf.copyOf(len).map { it.toInt() and 0xff })
+    }
+
+    @Test
+    fun assignsNonBmpUnitsLikeJavaScript() {
+        val split = doubleArrayOf(0.5, 0.5)
+        val expected = mapOf("😀" to 1, "🇵🇹" to 0, "a€𝄞z" to 1, "user😀id" to 0)
+        for ((unit, variant) in expected) {
+            assertEquals(variant, VariantAssigner(Hashing.hashUnit(unit)).assign(split, 3603583, 233373918), unit)
+        }
+    }
+
     @Test
     fun hashUnitBufferSizeHandlesLargeUnicode() {
         val input = "\u4e16".repeat(500)
