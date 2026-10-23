@@ -30,22 +30,17 @@ internal object Buffers {
         return buf[offset].toInt() and 0xff
     }
 
+    // String.toByteArray(UTF_8) turns a lone surrogate into '?'; like JavaScript's TextEncoder,
+    // it must become U+FFFD (EF BF BD) so unit hashes agree across SDKs.
     fun encodeUTF8(buf: ByteArray, offset: Int, value: CharSequence): Int {
-        var out = offset
-        for (i in 0 until value.length) {
-            val c = value[i].code
-            if (c < 0x80) {
-                buf[out++] = c.toByte()
-            } else if (c < 0x800) {
-                buf[out++] = ((c shr 6) or 192).toByte()
-                buf[out++] = ((c and 63) or 128).toByte()
-            } else {
-                buf[out++] = ((c shr 12) or 224).toByte()
-                buf[out++] = (((c shr 6) and 63) or 128).toByte()
-                buf[out++] = ((c and 63) or 128).toByte()
-            }
-        }
-        return out - offset
+        val encoder = Charsets.UTF_8.newEncoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
+            .replaceWith(byteArrayOf(0xEF.toByte(), 0xBF.toByte(), 0xBD.toByte()))
+        val bytes = encoder.encode(java.nio.CharBuffer.wrap(value))
+        val len = bytes.remaining()
+        bytes.get(buf, offset, len)
+        return len
     }
 }
 
@@ -236,12 +231,12 @@ internal object MD5 {
     }
 }
 
-internal object Hashing {
+object Hashing {
     private val threadBuffer = ThreadLocal.withInitial { ByteArray(512) }
 
     fun hashUnit(unit: CharSequence): ByteArray {
         val n = unit.length
-        val bufferLen = n shl 1
+        val bufferLen = n * 4
 
         var buffer = threadBuffer.get()
         if (buffer.size < bufferLen) {
