@@ -231,6 +231,32 @@ internal object MD5 {
     }
 }
 
+internal object Base64Url {
+    private val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+    fun encode(value: ByteArray): String {
+        val sb = StringBuilder((value.size * 4 + 2) / 3)
+        var i = 0
+        while (i + 2 < value.size) {
+            val n = ((value[i].toInt() and 0xff) shl 16) or ((value[i + 1].toInt() and 0xff) shl 8) or (value[i + 2].toInt() and 0xff)
+            sb.append(chars[(n ushr 18) and 63]).append(chars[(n ushr 12) and 63])
+                .append(chars[(n ushr 6) and 63]).append(chars[n and 63])
+            i += 3
+        }
+        when (value.size - i) {
+            1 -> {
+                val n = (value[i].toInt() and 0xff) shl 16
+                sb.append(chars[(n ushr 18) and 63]).append(chars[(n ushr 12) and 63])
+            }
+            2 -> {
+                val n = ((value[i].toInt() and 0xff) shl 16) or ((value[i + 1].toInt() and 0xff) shl 8)
+                sb.append(chars[(n ushr 18) and 63]).append(chars[(n ushr 12) and 63]).append(chars[(n ushr 6) and 63])
+            }
+        }
+        return sb.toString()
+    }
+}
+
 object Hashing {
     private val threadBuffer = ThreadLocal.withInitial { ByteArray(512) }
 
@@ -248,4 +274,35 @@ object Hashing {
         val encoded = Buffers.encodeUTF8(buffer, 0, unit)
         return MD5.digestBase64UrlNoPadding(buffer, 0, encoded)
     }
+
+    // A numeric UID hashes as its integer form, like JavaScript's value.toFixed(0) (125.75 -> "126").
+    fun hashUnit(unit: Number): ByteArray = hashUnit(unitToString(unit))
+
+    fun hashUnit(unit: Any): ByteArray = when (unit) {
+        is CharSequence -> hashUnit(unit)
+        is Number -> hashUnit(unit)
+        else -> throw IllegalArgumentException("Unit UID must be a string or a number.")
+    }
+
+    internal fun unitToString(unit: Number): String {
+        val exact = when (unit) {
+            is Byte, is Short, is Int, is Long -> java.math.BigDecimal(unit.toLong())
+            is java.math.BigInteger -> java.math.BigDecimal(unit)
+            is java.math.BigDecimal -> unit
+            else -> {
+                val d = unit.toDouble()
+                require(!d.isNaN() && !d.isInfinite()) { "Unit UID must be a finite number." }
+                java.math.BigDecimal(d)
+            }
+        }
+        return exact.setScale(0, java.math.RoundingMode.HALF_UP).toPlainString()
+    }
+
+    fun utf8Bytes(value: CharSequence): ByteArray {
+        val buffer = ByteArray(value.length * 4)
+        val len = Buffers.encodeUTF8(buffer, 0, value)
+        return buffer.copyOf(len)
+    }
+
+    fun base64UrlNoPadding(value: ByteArray): String = Base64Url.encode(value)
 }

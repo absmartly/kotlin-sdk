@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class Context private constructor(
-    private val units: MutableMap<String, String>,
+    private val units: MutableMap<String, Any>,
     private val eventLogger: ContextEventLogger?,
     private val eventHandler: ContextPublisher?,
     private val dataProvider: ContextDataProvider?,
@@ -25,12 +25,12 @@ class Context private constructor(
 
     constructor(
         data: ContextData,
-        units: MutableMap<String, String>,
+        units: Map<String, Any>,
         options: ContextOptions,
         eventLogger: ContextEventLogger? = null,
         startReady: Boolean = true
     ) : this(
-        units = units,
+        units = HashMap(units),
         eventLogger = eventLogger,
         eventHandler = null,
         dataProvider = null,
@@ -58,8 +58,7 @@ class Context private constructor(
             eventLogger: ContextEventLogger?,
             scheduler: ScheduledExecutorService?
         ): Context {
-            val units = mutableMapOf<String, String>()
-            config.getUnits()?.let { units.putAll(it) }
+            val units = mutableMapOf<String, Any>()
 
             val configLogger = config.eventLogger ?: eventLogger
 
@@ -73,6 +72,7 @@ class Context private constructor(
                 scheduler = scheduler
             )
 
+            config.getUnits()?.let { context.setUnits(it) }
             config.getOverrides()?.forEach { (k, v) -> context.overrides[k] = v }
             config.getCustomAssignments()?.forEach { (k, v) -> context.cassignments[k] = v }
             config.getAttributes()?.forEach { (k, v) ->
@@ -89,9 +89,10 @@ class Context private constructor(
                 synchronized(context.refreshLock_) {
                     if (context.appliedRefreshSeq_ == 0L) context.setData(data)
                 }
+                // Logged before the ready future completes, so a caller woken by readiness sees the event.
+                context.logEvent(ContextEventLogger.EventType.Ready, data)
                 val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
                 rf?.complete(null)
-                context.logEvent(ContextEventLogger.EventType.Ready, data)
                 context.startTimers()
             }.exceptionally { exception ->
                 if (context.closed_.get() || context.closing_.get()) {
@@ -211,9 +212,6 @@ class Context private constructor(
                             if (prev == null || prev.isDone) {
                                 val f = refresh()
                                 scheduledRefresh_ = f
-                                f.whenComplete { _, ex ->
-                                    if (ex != null) logEvent(ContextEventLogger.EventType.Error, ex)
-                                }
                             }
                         }
                     } catch (e: Exception) {
@@ -231,7 +229,7 @@ class Context private constructor(
         }
     }
 
-    fun getUnits(): Map<String, String> = HashMap(units)
+    fun getUnits(): Map<String, Any> = HashMap(units)
 
     fun getAttributes(): Map<String, Any?> {
         val result = mutableMapOf<String, Any?>()
@@ -243,9 +241,9 @@ class Context private constructor(
         return result
     }
 
-    fun setUnits(newUnits: Map<String, String>) {
+    fun setUnits(newUnits: Map<String, Any>) {
         for ((k, v) in newUnits) {
-            setUnit(k, v)
+            setUnitValue(k, v)
         }
     }
 
@@ -315,20 +313,37 @@ class Context private constructor(
             return keys
         }
 
-    fun setUnit(unitType: String, uid: String) {
+    fun setUnit(unitType: String, uid: String) = setUnitValue(unitType, uid)
+
+    // Numeric UIDs keep their type, as in the JavaScript SDK; they hash as their rounded integer form.
+    fun setUnit(unitType: String, uid: Number) = setUnitValue(unitType, uid)
+
+    private fun setUnitValue(unitType: String, uid: Any) {
         checkNotClosed()
-        val uidStr = uid.trim()
+        val value: Any = when (uid) {
+            is String -> {
+                val trimmed = uid.trim()
+                if (trimmed.isEmpty()) {
+                    throw IllegalArgumentException("Unit '$unitType' UID must not be blank.")
+                }
+                trimmed
+            }
+            is Number -> uid
+            else -> throw IllegalArgumentException("Unit '$unitType' must be a string or a number.")
+        }
         val previous = units[unitType]
-        if (previous != null && previous != uidStr) {
+        if (previous != null && !sameUid(previous, value)) {
             throw IllegalArgumentException("Unit '$unitType' UID already set.")
         }
-        if (uidStr.isEmpty()) {
-            throw IllegalArgumentException("Unit '$unitType' UID must not be blank.")
-        }
-        units[unitType] = uidStr
+        units[unitType] = value
     }
 
-    fun getUnit(unitType: String): String? = units[unitType]
+    private fun sameUid(a: Any, b: Any): Boolean {
+        if (a is Number && b is Number) return a.toDouble() == b.toDouble()
+        return a == b
+    }
+
+    fun getUnit(unitType: String): Any? = units[unitType]
 
     fun setAttribute(name: String, value: Any?) {
         checkNotClosed()
@@ -465,24 +480,32 @@ class Context private constructor(
         if (won) {
             stopTimers()
             readyFuture_.get()?.let { if (!it.isDone) it.complete(null) }
+            var failure: Throwable? = null
             try {
                 if (pendingCount_.get() > 0) {
                     flush().join()
                 }
-            } finally {
-                // Wait for publishes admitted before close so the client is not shut down under them.
-                for (f in inFlight_.toList()) {
-                    try {
-                        f.join()
-                    } catch (_: Exception) {
-                    }
-                }
-                // Close wins regardless of the final publish outcome; a failure still propagates to the caller.
-                // closing_ stays set: isClosing already reports false once closed_ is true, and keeping it
-                // set stops a late close() from winning the CAS again.
-                closed_.set(true)
-                logEvent(ContextEventLogger.EventType.Close, null)
+            } catch (e: Throwable) {
+                failure = e
             }
+            // Wait for publishes admitted before close so the client is not shut down under them.
+            for (f in inFlight_.toList()) {
+                try {
+                    f.join()
+                } catch (_: Exception) {
+                }
+            }
+            if (failure != null) {
+                // A failed final publish leaves the events queued and the context open, so close() can be retried.
+                closing_.set(false)
+                startTimers()
+                val cause = if (failure is java.util.concurrent.CompletionException && failure.cause != null) failure.cause!! else failure
+                throw cause
+            }
+            // closing_ stays set: isClosing already reports false once closed_ is true, and keeping it
+            // set stops a late close() from winning the CAS again.
+            closed_.set(true)
+            logEvent(ContextEventLogger.EventType.Close, null)
         }
     }
 
@@ -493,26 +516,34 @@ class Context private constructor(
 
     fun setDataAndReady(newData: ContextData) {
         setData(newData)
+        failed_ = false
+        readyError_ = null
         ready_ = true
-        readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
         logEvent(ContextEventLogger.EventType.Ready, newData)
+        readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
     }
 
+    // A context whose initial load failed stays failed: refresh is a successful no-op, like the JavaScript SDK.
     fun refresh(): CompletableFuture<Void> {
-        if (dataProvider == null) {
+        if (dataProvider == null || failed_) {
             return CompletableFuture.completedFuture(null)
         }
         if (closed_.get() || closing_.get()) return CompletableFuture.completedFuture(null)
         val seq = refreshSeq_.incrementAndGet()
         return dataProvider.getContextData().thenAccept { newData ->
             applyRefresh(seq, newData)
+        }.whenComplete { _, ex ->
+            if (ex != null) logEvent(ContextEventLogger.EventType.Error, unwrap(ex))
         }
     }
 
     fun refresh(newData: ContextData) {
-        if (closed_.get() || closing_.get()) return
+        if (failed_ || closed_.get() || closing_.get()) return
         applyRefresh(refreshSeq_.incrementAndGet(), newData)
     }
+
+    private fun unwrap(ex: Throwable): Throwable =
+        if (ex is java.util.concurrent.CompletionException && ex.cause != null) ex.cause!! else ex
 
     // Only the most recently requested refresh may win; older or post-close completions are dropped.
     private fun applyRefresh(seq: Long, newData: ContextData) {
@@ -561,8 +592,6 @@ class Context private constructor(
 
         index_ = newIndex
         indexVariables_ = newVarIndex
-        failed_ = false
-        readyError_ = null
         ready_ = true
 
         val iter = assignmentCache.iterator()
@@ -824,8 +853,7 @@ class Context private constructor(
             attributes = attrList
         )
 
-        logEvent(ContextEventLogger.EventType.Publish, event)
-
+        // Like the JavaScript SDK, the publish event is logged once the batch is delivered.
         if (eventHandler != null) {
             val requeue = { exception: Throwable ->
                 for (exposure in exposureList) {
@@ -844,15 +872,16 @@ class Context private constructor(
                 return CompletableFuture<Void>().also { it.completeExceptionally(e) }
             }
             val tracked = future.whenComplete { _, exception ->
-                if (exception != null) requeue(exception)
+                if (exception != null) requeue(exception) else logEvent(ContextEventLogger.EventType.Publish, event)
             }
             return tracked
         }
 
+        logEvent(ContextEventLogger.EventType.Publish, event)
         return CompletableFuture.completedFuture(null)
     }
 
-    private fun getUnitHash(unitType: String, uid: String): ByteArray {
+    private fun getUnitHash(unitType: String, uid: Any): ByteArray {
         return hashedUnits_.computeIfAbsent(unitType) {
             Hashing.hashUnit(uid)
         }

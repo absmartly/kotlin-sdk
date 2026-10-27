@@ -7,7 +7,7 @@ class ContextConfig private constructor() {
         fun create(): ContextConfig = ContextConfig()
     }
 
-    private var units: MutableMap<String, String>? = null
+    private var units: MutableMap<String, Any>? = null
     private var attributes: MutableMap<String, Any>? = null
     private var overrides: MutableMap<String, Int>? = null
     private var cassignments: MutableMap<String, Int>? = null
@@ -23,15 +23,24 @@ class ContextConfig private constructor() {
         units!![unitType] = uid
     }
 
-    fun setUnits(units: Map<String, String>): ContextConfig = apply {
+    fun setUnit(unitType: String, uid: Number): ContextConfig = apply {
+        if (units == null) units = mutableMapOf()
+        units!![unitType] = uid
+    }
+
+    fun setUnits(units: Map<String, Any>): ContextConfig = apply {
         for ((k, v) in units) {
-            setUnit(k, v)
+            when (v) {
+                is String -> setUnit(k, v)
+                is Number -> setUnit(k, v)
+                else -> throw IllegalArgumentException("Unit '$k' must be a string or a number.")
+            }
         }
     }
 
-    fun getUnit(unitType: String): String? = units?.get(unitType)
+    fun getUnit(unitType: String): Any? = units?.get(unitType)
 
-    fun getUnits(): Map<String, String>? = units
+    fun getUnits(): Map<String, Any>? = units
 
     fun setAttribute(name: String, value: Any): ContextConfig = apply {
         if (attributes == null) attributes = mutableMapOf()
