@@ -82,7 +82,8 @@ class Context private constructor(
             val readyFuture = CompletableFuture<Void>()
             context.readyFuture_.set(readyFuture)
             dataFuture.thenAccept { data ->
-                if (context.closed_.get() || context.closing_.get()) {
+                // While closing, the data is still applied: a close whose final publish fails reopens the context.
+                if (context.closed_.get()) {
                     context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
                     return@thenAccept
                 }
@@ -95,7 +96,7 @@ class Context private constructor(
                 rf?.complete(null)
                 context.startTimers()
             }.exceptionally { exception ->
-                if (context.closed_.get() || context.closing_.get()) {
+                if (context.closed_.get()) {
                     context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
                     return@exceptionally null
                 }
@@ -226,6 +227,8 @@ class Context private constructor(
         synchronized(this) {
             publishTask_?.cancel(false)
             refreshTask_?.cancel(false)
+            publishTask_ = null
+            refreshTask_ = null
         }
     }
 
@@ -332,14 +335,21 @@ class Context private constructor(
             else -> throw IllegalArgumentException("Unit '$unitType' must be a string or a number.")
         }
         val previous = units[unitType]
-        if (previous != null && !sameUid(previous, value)) {
-            throw IllegalArgumentException("Unit '$unitType' UID already set.")
+        if (previous != null) {
+            if (!sameUid(previous, value)) throw IllegalArgumentException("Unit '$unitType' UID already set.")
+            // An equal reset keeps the stored value, which the cached unit hash was computed from.
+            return
         }
         units[unitType] = value
     }
 
+    // Exact numeric comparison, so distinct large Long ids that share a Double never compare equal.
     private fun sameUid(a: Any, b: Any): Boolean {
-        if (a is Number && b is Number) return a.toDouble() == b.toDouble()
+        if (a is Number && b is Number) {
+            val x = Hashing.exactValue(a)
+            val y = Hashing.exactValue(b)
+            return if (x == null || y == null) a.toDouble().equals(b.toDouble()) else x.compareTo(y) == 0
+        }
         return a == b
     }
 
@@ -479,7 +489,6 @@ class Context private constructor(
         }
         if (won) {
             stopTimers()
-            readyFuture_.get()?.let { if (!it.isDone) it.complete(null) }
             var failure: Throwable? = null
             try {
                 if (pendingCount_.get() > 0) {
@@ -505,6 +514,7 @@ class Context private constructor(
             // closing_ stays set: isClosing already reports false once closed_ is true, and keeping it
             // set stops a late close() from winning the CAS again.
             closed_.set(true)
+            readyFuture_.get()?.let { if (!it.isDone) it.complete(null) }
             logEvent(ContextEventLogger.EventType.Close, null)
         }
     }
@@ -822,6 +832,11 @@ class Context private constructor(
             return CompletableFuture.completedFuture(null)
         }
 
+        // Hashed before the queues are drained, so a hashing failure cannot drop queued events.
+        val unitList = units.map { (type, uid) ->
+            com.absmartly.sdk.Unit(type, String(getUnitHash(type, uid), Charsets.US_ASCII))
+        }
+
         val exposureList = mutableListOf<Exposure>()
         val goalList = mutableListOf<GoalAchievement>()
 
@@ -835,10 +850,6 @@ class Context private constructor(
         }
         val drained = exposureList.size + goalList.size
         pendingCount_.addAndGet(-drained)
-
-        val unitList = units.map { (type, uid) ->
-            com.absmartly.sdk.Unit(type, String(getUnitHash(type, uid), Charsets.US_ASCII))
-        }
 
         val attrList = synchronized(attributes_) {
             if (attributes_.isEmpty()) null else attributes_.toList()

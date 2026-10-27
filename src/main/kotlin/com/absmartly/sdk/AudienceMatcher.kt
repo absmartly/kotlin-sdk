@@ -44,7 +44,7 @@ internal object JsonExpr {
     }
 
     // Shortest round-trip digits; JDK 11 Double.toString is not always shortest.
-    private fun jsExponential(abs: Double): String {
+    internal fun jsExponential(abs: Double): String {
         val exact = java.math.BigDecimal(abs)
         var bd = exact
         for (p in 1..17) {

@@ -163,4 +163,100 @@ class ContextLifecycleParityTest {
         assertEquals(0, context.pendingCount)
         assertEquals(listOf(ContextEventLogger.EventType.Publish, ContextEventLogger.EventType.Close), logger.types())
     }
+
+    @Test
+    fun numericUidHashingFollowsJavaScriptToFixed() {
+        assertEquals("-0", Hashing.unitToString(-0.1))
+        assertEquals("0", Hashing.unitToString(-0.0))
+        assertEquals("-3", Hashing.unitToString(-2.5))
+        assertEquals("1e+21", Hashing.unitToString(1e21))
+        assertEquals("999999999999999868928", Hashing.unitToString(999999999999999900000.0))
+        assertEquals("NaN", Hashing.unitToString(Double.NaN))
+        assertEquals("9007199254740993", Hashing.unitToString(9007199254740993L))
+    }
+
+    @Test
+    fun distinctLargeLongUnitsAreNotTreatedAsTheSameUid() {
+        val context = Context(experimentData(), mutableMapOf(), ContextOptions())
+        context.setUnit("user_id", 9007199254740992L)
+        context.setUnit("user_id", 9007199254740992.0)
+        assertFailsWith<IllegalArgumentException> { context.setUnit("user_id", 9007199254740993L) }
+        assertEquals(9007199254740992L, context.getUnit("user_id"))
+    }
+
+    @Test
+    fun nonFiniteNumericUnitsPublishWithoutLosingEvents() {
+        val publisher = FlakyPublisher().apply { fail = false }
+        val sent = mutableListOf<PublishEvent>()
+        val recording = object : ContextPublisher {
+            override fun publish(context: Context, event: PublishEvent): CompletableFuture<Void> {
+                sent.add(event); return publisher.publish(context, event)
+            }
+        }
+        val context = Context.create(
+            ContextConfig.create().setUnit("session_id", "abc").setPublishDelay(-1),
+            CompletableFuture.completedFuture(experimentData()), null, recording, null, null
+        )
+        context.setUnit("weird", Double.NaN)
+        context.track("signup", null)
+        context.publish().get(1, TimeUnit.SECONDS)
+        assertEquals(0, context.pendingCount)
+        assertEquals(1, sent.size)
+        assertEquals(String(Hashing.hashUnit("NaN"), Charsets.US_ASCII), sent[0].units!!.first { it.type == "weird" }.uid)
+    }
+
+    private class ManualScheduler : java.util.concurrent.ScheduledThreadPoolExecutor(1) {
+        val scheduled = AtomicInteger(0)
+        override fun scheduleWithFixedDelay(command: Runnable, initialDelay: Long, delay: Long, unit: TimeUnit): java.util.concurrent.ScheduledFuture<*> {
+            scheduled.incrementAndGet()
+            return super.scheduleWithFixedDelay(command, initialDelay, delay, unit)
+        }
+    }
+
+    @Test
+    fun failedCloseRestartsAutomaticPublishing() {
+        val publisher = FlakyPublisher()
+        val scheduler = ManualScheduler()
+        try {
+            val context = Context.create(
+                ContextConfig.create().setUnit("session_id", "abc").setPublishDelay(50),
+                CompletableFuture.completedFuture(experimentData()), null, publisher, null, scheduler
+            )
+            assertEquals(1, scheduler.scheduled.get())
+            context.track("signup", null)
+            assertFailsWith<RuntimeException> { context.close() }
+            assertEquals(2, scheduler.scheduled.get())
+            publisher.fail = false
+            val deadline = System.currentTimeMillis() + 2000
+            while (context.pendingCount > 0 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+            assertEquals(0, context.pendingCount)
+        } finally {
+            scheduler.shutdownNow()
+        }
+    }
+
+    @Test
+    fun initialLoadDuringFailedCloseStillMakesTheContextReady() {
+        val publish = CompletableFuture<Void>()
+        val data = CompletableFuture<ContextData>()
+        val publisher = object : ContextPublisher {
+            override fun publish(context: Context, event: PublishEvent) = publish
+        }
+        val context = Context.create(
+            ContextConfig.create().setUnit("session_id", "abc").setPublishDelay(-1),
+            data, null, publisher, null, null
+        )
+        context.track("signup", null)
+        val closing = Thread { runCatching { context.close() } }.apply { start() }
+        val deadline = System.currentTimeMillis() + 2000
+        while (!context.isClosing && System.currentTimeMillis() < deadline) Thread.sleep(5)
+        data.complete(experimentData())
+        publish.completeExceptionally(RuntimeException("Publish failed"))
+        closing.join(2000)
+
+        assertEquals(false, context.isClosed)
+        assertTrue(context.isReady)
+        context.waitUntilReady()
+        assertEquals(1, context.getTreatment("exp_test_ab"))
+    }
 }

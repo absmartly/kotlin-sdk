@@ -284,18 +284,29 @@ object Hashing {
         else -> throw IllegalArgumentException("Unit UID must be a string or a number.")
     }
 
+    // Exact value of a number, or null for NaN and infinities.
+    internal fun exactValue(n: Number): java.math.BigDecimal? = when (n) {
+        is Byte, is Short, is Int, is Long -> java.math.BigDecimal(n.toLong())
+        is java.math.BigInteger -> java.math.BigDecimal(n)
+        is java.math.BigDecimal -> n
+        else -> n.toDouble().let { d -> if (d.isNaN() || d.isInfinite()) null else java.math.BigDecimal(d) }
+    }
+
+    // JavaScript Number.prototype.toFixed(0): the sign is taken first (so -0.1 gives "-0"), ties round
+    // away from zero, and magnitudes from 1e21 up (or NaN/Infinity) use String(x).
     internal fun unitToString(unit: Number): String {
-        val exact = when (unit) {
-            is Byte, is Short, is Int, is Long -> java.math.BigDecimal(unit.toLong())
-            is java.math.BigInteger -> java.math.BigDecimal(unit)
-            is java.math.BigDecimal -> unit
-            else -> {
-                val d = unit.toDouble()
-                require(!d.isNaN() && !d.isInfinite()) { "Unit UID must be a finite number." }
-                java.math.BigDecimal(d)
-            }
+        if (unit is Double || unit is Float) {
+            val d = unit.toDouble()
+            if (d.isNaN()) return "NaN"
+            if (d.isInfinite()) return if (d > 0) "Infinity" else "-Infinity"
+            val sign = if (d < 0) "-" else ""
+            val abs = Math.abs(d)
+            if (abs >= 1e21) return sign + JsonExpr.jsExponential(abs)
+            return sign + java.math.BigDecimal(abs).setScale(0, java.math.RoundingMode.HALF_UP).toPlainString()
         }
-        return exact.setScale(0, java.math.RoundingMode.HALF_UP).toPlainString()
+        val exact = exactValue(unit)!!
+        val sign = if (exact.signum() < 0) "-" else ""
+        return sign + exact.abs().setScale(0, java.math.RoundingMode.HALF_UP).toPlainString()
     }
 
     fun utf8Bytes(value: CharSequence): ByteArray {
