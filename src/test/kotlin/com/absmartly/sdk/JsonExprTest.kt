@@ -129,7 +129,8 @@ class JsonExprTest {
         assertFalse(JsonExpr.evaluateBooleanExpr(
             mapOf("eq" to listOf(mapOf("value" to "abc"), mapOf("value" to "def"))), emptyVars
         ))
-        assertTrue(JsonExpr.evaluateBooleanExpr(
+        // eq(null, null) is canonically null (not a match); coerced to false.
+        assertFalse(JsonExpr.evaluateBooleanExpr(
             mapOf("eq" to listOf(mapOf("value" to null), mapOf("value" to null))), emptyVars
         ))
     }
@@ -228,9 +229,13 @@ class JsonExprTest {
     }
 
     @Test
-    fun mapWithMoreThanOneKeyReturnsNull() {
-        assertFalse(JsonExpr.evaluateBooleanExpr(
+    fun mapWithMoreThanOneKeyUsesFirstKeyLikeJs() {
+        // JS Evaluator only considers the first key of an expression object.
+        assertTrue(JsonExpr.evaluateBooleanExpr(
             mapOf("value" to 1, "extra" to 2), emptyVars
+        ))
+        assertFalse(JsonExpr.evaluateBooleanExpr(
+            mapOf("extra" to 2, "value" to 1), emptyVars
         ))
     }
 }

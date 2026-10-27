@@ -30,22 +30,17 @@ internal object Buffers {
         return buf[offset].toInt() and 0xff
     }
 
+    // String.toByteArray(UTF_8) turns a lone surrogate into '?'; like JavaScript's TextEncoder,
+    // it must become U+FFFD (EF BF BD) so unit hashes agree across SDKs.
     fun encodeUTF8(buf: ByteArray, offset: Int, value: CharSequence): Int {
-        var out = offset
-        for (i in 0 until value.length) {
-            val c = value[i].code
-            if (c < 0x80) {
-                buf[out++] = c.toByte()
-            } else if (c < 0x800) {
-                buf[out++] = ((c shr 6) or 192).toByte()
-                buf[out++] = ((c and 63) or 128).toByte()
-            } else {
-                buf[out++] = ((c shr 12) or 224).toByte()
-                buf[out++] = (((c shr 6) and 63) or 128).toByte()
-                buf[out++] = ((c and 63) or 128).toByte()
-            }
-        }
-        return out - offset
+        val encoder = Charsets.UTF_8.newEncoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
+            .replaceWith(byteArrayOf(0xEF.toByte(), 0xBF.toByte(), 0xBD.toByte()))
+        val bytes = encoder.encode(java.nio.CharBuffer.wrap(value))
+        val len = bytes.remaining()
+        bytes.get(buf, offset, len)
+        return len
     }
 }
 
@@ -236,12 +231,38 @@ internal object MD5 {
     }
 }
 
-internal object Hashing {
+internal object Base64Url {
+    private val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+    fun encode(value: ByteArray): String {
+        val sb = StringBuilder((value.size * 4 + 2) / 3)
+        var i = 0
+        while (i + 2 < value.size) {
+            val n = ((value[i].toInt() and 0xff) shl 16) or ((value[i + 1].toInt() and 0xff) shl 8) or (value[i + 2].toInt() and 0xff)
+            sb.append(chars[(n ushr 18) and 63]).append(chars[(n ushr 12) and 63])
+                .append(chars[(n ushr 6) and 63]).append(chars[n and 63])
+            i += 3
+        }
+        when (value.size - i) {
+            1 -> {
+                val n = (value[i].toInt() and 0xff) shl 16
+                sb.append(chars[(n ushr 18) and 63]).append(chars[(n ushr 12) and 63])
+            }
+            2 -> {
+                val n = ((value[i].toInt() and 0xff) shl 16) or ((value[i + 1].toInt() and 0xff) shl 8)
+                sb.append(chars[(n ushr 18) and 63]).append(chars[(n ushr 12) and 63]).append(chars[(n ushr 6) and 63])
+            }
+        }
+        return sb.toString()
+    }
+}
+
+object Hashing {
     private val threadBuffer = ThreadLocal.withInitial { ByteArray(512) }
 
     fun hashUnit(unit: CharSequence): ByteArray {
         val n = unit.length
-        val bufferLen = n shl 1
+        val bufferLen = n * 4
 
         var buffer = threadBuffer.get()
         if (buffer.size < bufferLen) {
@@ -253,4 +274,45 @@ internal object Hashing {
         val encoded = Buffers.encodeUTF8(buffer, 0, unit)
         return MD5.digestBase64UrlNoPadding(buffer, 0, encoded)
     }
+
+    // A numeric UID hashes as its integer form, like JavaScript's value.toFixed(0) (125.75 -> "126").
+    fun hashUnit(unit: Number): ByteArray = hashUnit(unitToString(unit))
+
+    fun hashUnit(unit: Any): ByteArray = when (unit) {
+        is CharSequence -> hashUnit(unit)
+        is Number -> hashUnit(unit)
+        else -> throw IllegalArgumentException("Unit UID must be a string or a number.")
+    }
+
+    internal fun exactValue(n: Number): java.math.BigDecimal? = when (n) {
+        is Byte, is Short, is Int, is Long -> java.math.BigDecimal(n.toLong())
+        is java.math.BigInteger -> java.math.BigDecimal(n)
+        is java.math.BigDecimal -> n
+        else -> n.toDouble().let { d -> if (d.isNaN() || d.isInfinite()) null else java.math.BigDecimal(d) }
+    }
+
+    // JavaScript Number.prototype.toFixed(0): the sign is taken first (so -0.1 gives "-0"), ties round
+    // away from zero, and magnitudes from 1e21 up (or NaN/Infinity) use String(x).
+    internal fun unitToString(unit: Number): String {
+        if (unit is Double || unit is Float) {
+            val d = unit.toDouble()
+            if (d.isNaN()) return "NaN"
+            if (d.isInfinite()) return if (d > 0) "Infinity" else "-Infinity"
+            val sign = if (d < 0) "-" else ""
+            val abs = Math.abs(d)
+            if (abs >= 1e21) return sign + JsonExpr.jsExponential(abs)
+            return sign + java.math.BigDecimal(abs).setScale(0, java.math.RoundingMode.HALF_UP).toPlainString()
+        }
+        val exact = exactValue(unit)!!
+        val sign = if (exact.signum() < 0) "-" else ""
+        return sign + exact.abs().setScale(0, java.math.RoundingMode.HALF_UP).toPlainString()
+    }
+
+    fun utf8Bytes(value: CharSequence): ByteArray {
+        val buffer = ByteArray(value.length * 4)
+        val len = Buffers.encodeUTF8(buffer, 0, value)
+        return buffer.copyOf(len)
+    }
+
+    fun base64UrlNoPadding(value: ByteArray): String = Base64Url.encode(value)
 }

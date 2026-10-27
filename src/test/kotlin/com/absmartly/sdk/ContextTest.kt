@@ -239,6 +239,20 @@ class ContextTest {
         return Context(data, units, options, eventLogger)
     }
 
+    private fun createContextWithProvider(
+        data: ContextData = createContextData(),
+        refreshData: ContextData,
+        eventLogger: ContextEventLogger? = null
+    ): Context {
+        val provider = object : ContextDataProvider {
+            override fun getContextData(): java.util.concurrent.CompletableFuture<ContextData> =
+                java.util.concurrent.CompletableFuture.completedFuture(refreshData)
+        }
+        val config = ContextConfig.create().setUnits(units)
+        eventLogger?.let { config.setEventLogger(it) }
+        return Context.create(config, java.util.concurrent.CompletableFuture.completedFuture(data), provider, null, eventLogger, null)
+    }
+
     // --- State Tests ---
 
     @Test
@@ -592,9 +606,7 @@ class ContextTest {
     fun closedContextThrowsOnGetTreatment() {
         val context = createContext()
         context.close()
-        assertFailsWith<IllegalStateException> {
-            context.getTreatment("exp_test_ab")
-        }
+        assertFailsWith<IllegalStateException> { context.getTreatment("exp_test_ab") }
     }
 
     @Test
@@ -634,21 +646,20 @@ class ContextTest {
     }
 
     @Test
-    fun closedContextThrowsOnSetOverride() {
+    fun closedContextAllowsSetOverride() {
         val context = createContext()
         context.close()
-        assertFailsWith<IllegalStateException> {
-            context.setOverride("exp", 1)
-        }
+        context.setOverride("exp", 1)
     }
 
     @Test
-    fun closedContextThrowsOnSetCustomAssignment() {
+    fun closedContextAllowsSetCustomAssignment() {
         val context = createContext()
         context.close()
-        assertFailsWith<IllegalStateException> {
-            context.setCustomAssignment("exp", 1)
-        }
+        context.setCustomAssignment("exp", 1)
+        context.setCustomAssignments(mapOf("exp" to 2, "other" to 1))
+        assertTrue(context.isClosed)
+        assertFailsWith<IllegalStateException> { context.getTreatment("exp") }
     }
 
     @Test
@@ -659,29 +670,48 @@ class ContextTest {
         assertTrue(context.isClosed)
     }
 
+    @Test
+    fun finalizeIsAliasForClose() {
+        val context = createContext()
+        assertFalse(context.isFinalized)
+        assertFalse(context.isFinalizing)
+        @Suppress("DEPRECATION")
+        context.finalize()
+        assertTrue(context.isFinalized)
+        assertTrue(context.isClosed)
+    }
+
+    @Test
+    fun isFinalizedReflectsClosedState() {
+        val context = createContext()
+        assertFalse(context.isFinalized)
+        context.close()
+        assertTrue(context.isFinalized)
+    }
+
     // --- Refresh ---
 
     @Test
     fun refreshUpdatesData() {
-        val context = createContext()
         val refreshData = createRefreshContextData()
-        context.refresh(refreshData)
+        val context = createContextWithProvider(refreshData = refreshData)
+        context.refresh().get()
         assertEquals(listOf("exp_test_new"), context.experiments)
     }
 
     @Test
     fun refreshClearsOldAssignments() {
-        val context = createContext()
+        val context = createContextWithProvider(refreshData = createRefreshContextData())
         assertEquals(1, context.getTreatment("exp_test_ab"))
-        context.refresh(createRefreshContextData())
+        context.refresh().get()
         assertEquals(0, context.getTreatment("exp_test_ab"))
     }
 
     @Test
     fun refreshNewExperimentTreatment() {
-        val context = createContext()
         val refreshData = createRefreshContextData()
-        context.refresh(refreshData)
+        val context = createContextWithProvider(refreshData = refreshData)
+        context.refresh().get()
         assertEquals(1, context.getTreatment("exp_test_new"))
     }
 
@@ -924,8 +954,8 @@ class ContextTest {
                 events.add(type to data)
             }
         }
-        val context = createContext(eventLogger = logger)
-        context.refresh(createRefreshContextData())
+        val context = createContextWithProvider(refreshData = createRefreshContextData(), eventLogger = logger)
+        context.refresh().get()
         assertTrue(events.any { it.first == ContextEventLogger.EventType.Refresh })
     }
 
@@ -975,5 +1005,188 @@ class ContextTest {
     fun treatmentReturnsZeroWhenUnitTypeMissing() {
         val context = createContext(units = mutableMapOf())
         assertEquals(0, context.getTreatment("exp_test_ab"))
+    }
+
+    // --- Publish error handling ---
+
+    @Test
+    fun publishKeepsEventsPendingOnFailure() {
+        val failure = RuntimeException("PUBLISH_FAILED")
+        val eventHandler = object : ContextPublisher {
+            override fun publish(context: Context, event: PublishEvent): java.util.concurrent.CompletableFuture<Void> {
+                val future = java.util.concurrent.CompletableFuture<Void>()
+                future.completeExceptionally(failure)
+                return future
+            }
+        }
+
+        val config = ContextConfig.create().setUnits(units)
+        val dataFuture = java.util.concurrent.CompletableFuture.completedFuture(createContextData())
+        val context = Context.create(config, dataFuture, null, eventHandler, null, null)
+        context.waitUntilReady()
+
+        context.track("goal1", mapOf("amount" to 125))
+        assertEquals(1, context.pendingCount)
+
+        val future = context.publish()
+        try {
+            future.get()
+        } catch (_: Exception) {}
+
+        assertEquals(1, context.pendingCount)
+    }
+
+    // --- Override after close ---
+
+    @Test
+    fun setOverrideSucceedsAfterClose() {
+        val context = createContext()
+        context.close()
+        assertTrue(context.isClosed)
+        context.setOverride("exp_test_ab", 2)
+    }
+
+    // --- readyError ---
+
+    @Test
+    fun readyErrorReturnsNullOnSuccess() {
+        val context = createContext()
+        assertNull(context.readyError())
+    }
+
+    @Test
+    fun readyErrorReturnsExceptionOnDataFailure() {
+        val exception = RuntimeException("data failed")
+        val f = java.util.concurrent.CompletableFuture<ContextData>()
+        f.completeExceptionally(exception)
+        val config = ContextConfig.create().setUnits(units)
+        val ctx = Context.create(config, f, null, null, null, null)
+        ctx.waitUntilReady()
+        assertTrue(ctx.isFailed)
+        assertNotNull(ctx.readyError())
+    }
+
+    // --- isClosing ---
+
+    @Test
+    fun isClosingReturnsFalseWhenNotClosing() {
+        val context = createContext()
+        assertFalse(context.isClosing)
+    }
+
+    @Test
+    fun isClosingReturnsFalseAfterClose() {
+        val context = createContext()
+        context.close()
+        assertFalse(context.isClosing)
+        assertTrue(context.isClosed)
+    }
+
+    // --- getUnits ---
+
+    @Test
+    fun getUnitsReturnsAllUnits() {
+        val context = createContext()
+        val result = context.getUnits()
+        assertEquals(units["session_id"], result["session_id"])
+        assertEquals(units["user_id"], result["user_id"])
+        assertEquals(units["email"], result["email"])
+    }
+
+    // --- getAttributes ---
+
+    @Test
+    fun getAttributesReturnsAllAttributes() {
+        val context = createContext()
+        context.setAttribute("key1", "val1")
+        context.setAttribute("key2", 42)
+        val result = context.getAttributes()
+        assertEquals("val1", result["key1"])
+        assertEquals(42, result["key2"])
+    }
+
+    @Test
+    fun getAttributesReturnsEmptyMapWhenNoAttributes() {
+        val context = createContext(units = mutableMapOf())
+        val result = context.getAttributes()
+        assertTrue(result.isEmpty())
+    }
+
+    // --- setUnits bulk setter ---
+
+    @Test
+    fun setUnitsBulkSetsAllUnits() {
+        val context = createContext(units = mutableMapOf())
+        context.setUnits(mapOf("user_id" to "abc", "email" to "test@test.com"))
+        assertEquals("abc", context.getUnit("user_id"))
+        assertEquals("test@test.com", context.getUnit("email"))
+    }
+
+    // --- setAttributes bulk setter ---
+
+    @Test
+    fun setAttributesBulkSetsAllAttributes() {
+        val context = createContext()
+        context.setAttributes(mapOf("k1" to "v1", "k2" to 99))
+        assertEquals("v1", context.getAttribute("k1"))
+        assertEquals(99, context.getAttribute("k2"))
+    }
+
+    // --- setOverrides bulk setter ---
+
+    @Test
+    fun setOverridesBulkSetsAllOverrides() {
+        val context = createContext()
+        context.setOverrides(mapOf("exp_test_ab" to 2, "exp_test_abc" to 1))
+        assertEquals(2, context.getTreatment("exp_test_ab"))
+        assertEquals(1, context.getTreatment("exp_test_abc"))
+    }
+
+    // --- setCustomAssignments bulk setter ---
+
+    @Test
+    fun setCustomAssignmentsBulkSetsAll() {
+        val context = createContext()
+        context.setCustomAssignments(mapOf("exp_test_ab" to 2))
+        assertEquals(2, context.getTreatment("exp_test_ab"))
+    }
+
+    // --- D1: reads throw when not ready / finalized (parity with JS _checkReady) ---
+
+    private fun assertAllReadsThrow(context: Context, message: String) {
+        val reads: List<() -> Any?> = listOf(
+            { context.getTreatment("exp_test_ab") },
+            { context.peekTreatment("exp_test_ab") },
+            { context.getVariableValue("banner.border", "default") },
+            { context.peekVariableValue("banner.border", "default") },
+            { context.variableKeys },
+            { context.customFieldKeys },
+            { context.getCustomFieldValue("exp_test_ab", "key") },
+            { context.getCustomFieldValueType("exp_test_ab", "key") },
+        )
+        for (read in reads) {
+            val e = assertFailsWith<IllegalStateException> { read() }
+            assertEquals(message, e.message)
+        }
+    }
+
+    @Test
+    fun readsThrowWhenNotReady() {
+        val dataFuture = java.util.concurrent.CompletableFuture<ContextData>()
+        val config = ContextConfig.create().setUnits(units)
+        val context = Context.create(config, dataFuture, null, null, null, null)
+        assertFalse(context.isReady)
+        assertAllReadsThrow(context, "ABsmartly Context is not yet ready.")
+        val e = assertFailsWith<IllegalStateException> { context.experiments }
+        assertEquals("ABsmartly Context is not yet ready.", e.message)
+    }
+
+    @Test
+    fun readsThrowWhenClosed() {
+        val context = createContext()
+        context.close()
+        assertTrue(context.isClosed)
+        assertAllReadsThrow(context, "ABsmartly Context is finalized.")
+        assertTrue(context.experiments.isNotEmpty())
     }
 }
