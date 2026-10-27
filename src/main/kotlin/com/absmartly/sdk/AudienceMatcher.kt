@@ -130,10 +130,8 @@ internal object JsonExpr {
 
     private fun binaryOp(args: Any?, vars: Map<String, Any?>, op: (Any, Any) -> Any?): Any? {
         if (args !is List<*>) return null
-        val left = if (args.isNotEmpty()) evaluate(args[0], vars) else null
-        if (left == null) return null
-        val right = if (args.size > 1) evaluate(args[1], vars) else null
-        if (right == null) return null
+        val left = evaluate(args.getOrNull(0), vars) ?: return null
+        val right = evaluate(args.getOrNull(1), vars) ?: return null
         return op(left, right)
     }
 

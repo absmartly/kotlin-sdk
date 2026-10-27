@@ -399,7 +399,7 @@ context.close()
 
 ### Reads Before Ready or After Close (BREAKING)
 
-Read methods (`getTreatment`, `peekTreatment`, `getVariableValue`, `peekVariableValue`, `variableKeys`, `customFieldKeys`, `getCustomFieldValue`, `getCustomFieldValueType`) throw an `IllegalStateException` when the context is not ready (`"ABsmartly Context is not yet ready."`) or when it is closing/closed (`"ABsmartly Context is finalizing."` / `"ABsmartly Context is finalized."`). `experiments` only requires the context to be ready and stays available after close. This matches the JavaScript SDK.
+Read methods (`getTreatment`, `peekTreatment`, `getVariableValue`, `peekVariableValue`, `variableKeys`, `customFieldKeys`, `getCustomFieldValue`, `getCustomFieldValueType`) throw an `IllegalStateException` when the context is not ready (`"ABsmartly Context is not yet ready."`) or when it is closing/closed (`"ABsmartly Context is finalizing."` / `"ABsmartly Context is finalized."`). `experiments` only requires the context to be ready and stays available after close. Overrides and custom assignments (single and bulk setters) also remain allowed after close; treatment reads remain guarded. This matches the JavaScript SDK.
 
 **Migration:** earlier builds of this branch returned defaults (`0`, the default value, empty collections or `null`) in these states. Call `waitUntilReady()` (or check `isReady`) before reading, do not read after `close()`, and catch `IllegalStateException` where a fallback is needed.
 

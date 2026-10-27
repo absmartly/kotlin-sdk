@@ -284,7 +284,6 @@ object Hashing {
         else -> throw IllegalArgumentException("Unit UID must be a string or a number.")
     }
 
-    // Exact value of a number, or null for NaN and infinities.
     internal fun exactValue(n: Number): java.math.BigDecimal? = when (n) {
         is Byte, is Short, is Int, is Long -> java.math.BigDecimal(n.toLong())
         is java.math.BigInteger -> java.math.BigDecimal(n)

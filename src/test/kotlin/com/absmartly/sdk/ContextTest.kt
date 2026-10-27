@@ -653,12 +653,13 @@ class ContextTest {
     }
 
     @Test
-    fun closedContextThrowsOnSetCustomAssignment() {
+    fun closedContextAllowsSetCustomAssignment() {
         val context = createContext()
         context.close()
-        assertFailsWith<IllegalStateException> {
-            context.setCustomAssignment("exp", 1)
-        }
+        context.setCustomAssignment("exp", 1)
+        context.setCustomAssignments(mapOf("exp" to 2, "other" to 1))
+        assertTrue(context.isClosed)
+        assertFailsWith<IllegalStateException> { context.getTreatment("exp") }
     }
 
     @Test

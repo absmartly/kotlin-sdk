@@ -90,7 +90,6 @@ class Context private constructor(
                 synchronized(context.refreshLock_) {
                     if (context.appliedRefreshSeq_ == 0L) context.setData(data)
                 }
-                // Logged before the ready future completes, so a caller woken by readiness sees the event.
                 context.logEvent(ContextEventLogger.EventType.Ready, data)
                 val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
                 rf?.complete(null)
@@ -234,15 +233,7 @@ class Context private constructor(
 
     fun getUnits(): Map<String, Any> = HashMap(units)
 
-    fun getAttributes(): Map<String, Any?> {
-        val result = mutableMapOf<String, Any?>()
-        synchronized(attributes_) {
-            for (attr in attributes_) {
-                result[attr.name] = attr.value
-            }
-        }
-        return result
-    }
+    fun getAttributes(): Map<String, Any?> = buildAttributesMap()
 
     fun setUnits(newUnits: Map<String, Any>) {
         for ((k, v) in newUnits) {
@@ -377,7 +368,6 @@ class Context private constructor(
     }
 
     fun setCustomAssignment(experimentName: String, variant: Int) {
-        checkNotClosed()
         cassignments[experimentName] = variant
     }
 
@@ -497,7 +487,6 @@ class Context private constructor(
             } catch (e: Throwable) {
                 failure = e
             }
-            // Wait for publishes admitted before close so the client is not shut down under them.
             for (f in inFlight_.toList()) {
                 try {
                     f.join()
@@ -555,7 +544,6 @@ class Context private constructor(
     private fun unwrap(ex: Throwable): Throwable =
         if (ex is java.util.concurrent.CompletionException && ex.cause != null) ex.cause!! else ex
 
-    // Only the most recently requested refresh may win; older or post-close completions are dropped.
     private fun applyRefresh(seq: Long, newData: ContextData) {
         synchronized(refreshLock_) {
             if (closed_.get() || closing_.get()) return

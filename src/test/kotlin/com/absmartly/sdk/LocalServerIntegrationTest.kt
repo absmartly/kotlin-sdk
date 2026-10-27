@@ -14,14 +14,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
-/**
- * Hermetic integration test: starts a real local HTTP server (JDK built-in
- * com.sun.net.httpserver.HttpServer) on an ephemeral port, points the SDK's
- * client endpoint at it, and drives the PUBLIC SDK API so the real
- * DefaultHTTPClient performs a GET /context (createContext -> waitUntilReady)
- * and a PUT /context (getTreatment + track -> publish). Asserts the wire
- * contract: paths, query params, headers and body fields.
- */
 class LocalServerIntegrationTest {
 
     private data class RecordedRequest(
@@ -104,7 +96,6 @@ class LocalServerIntegrationTest {
         val context = sdk.createContext(contextConfig)
         context.waitUntilReady()
 
-        // --- assert the real GET /context ---
         val get = requests.firstOrNull { it.method == "GET" }
         assertNotNull(get, "expected a GET /context")
         assertEquals("/context", get.path)
@@ -112,7 +103,6 @@ class LocalServerIntegrationTest {
         assertEquals("website", query["application"])
         assertEquals("dev", query["environment"])
 
-        // --- queue an event then publish ---
         context.getTreatment("not_found_experiment")
         context.track("payment", mapOf("value" to 99))
         context.publish().get()
@@ -122,7 +112,6 @@ class LocalServerIntegrationTest {
         assertEquals("/context", put.path)
         assertTrue(put.rawQuery.isNullOrEmpty(), "PUT should carry no query params")
 
-        // --- headers ---
         assertEquals("test-api-key", put.headers["x-api-key"])
         assertEquals("website", put.headers["x-application"])
         assertEquals("dev", put.headers["x-environment"])
@@ -133,7 +122,6 @@ class LocalServerIntegrationTest {
             "Content-Type must be application/json"
         )
 
-        // --- body ---
         val mapper = ObjectMapper()
         val node: JsonNode = mapper.readTree(put.body)
         assertTrue(node.has("hashed"))

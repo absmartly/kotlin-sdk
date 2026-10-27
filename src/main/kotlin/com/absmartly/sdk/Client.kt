@@ -69,43 +69,22 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
     }
 
     fun getContextData(): CompletableFuture<ContextData> {
-        val dataFuture = CompletableFuture<ContextData>()
-
-        httpClient.get(url, query, headers).thenAccept { response ->
+        return httpClient.get(url, query, headers).thenApply { response ->
             val code = response.statusCode
-            if (code / 100 == 2) {
-                val content = response.content
-                if (content.isEmpty()) {
-                    dataFuture.completeExceptionally(
-                        IllegalStateException("Empty response body from context data endpoint")
-                    )
-                } else {
-                    val data = deserializer.deserialize(content, 0, content.size)
-                    if (data != null) {
-                        dataFuture.complete(data)
-                    } else {
-                        dataFuture.completeExceptionally(
-                            IllegalStateException("Failed to deserialize context data")
-                        )
-                    }
-                }
-            } else {
-                dataFuture.completeExceptionally(
-                    Exception("HTTP $code: ${response.statusMessage} - ${String(response.content ?: ByteArray(0))}")
-                )
+            if (code / 100 != 2) {
+                throw Exception("HTTP $code: ${response.statusMessage} - ${String(response.content ?: ByteArray(0))}")
             }
-        }.exceptionally { exception ->
-            dataFuture.completeExceptionally(exception)
-            null
+            val content = response.content
+            if (content.isEmpty()) {
+                throw IllegalStateException("Empty response body from context data endpoint")
+            }
+            deserializer.deserialize(content, 0, content.size)
+                ?: throw IllegalStateException("Failed to deserialize context data")
         }
-
-        return dataFuture
     }
 
     fun publish(event: PublishEvent): CompletableFuture<Void> {
-        val publishFuture = CompletableFuture<Void>()
-
-        CompletableFuture.supplyAsync({
+        return CompletableFuture.supplyAsync({
             serializer.serialize(event)
         }, executor ?: ForkJoinPool.commonPool()).thenCompose { content ->
             if (content != null) {
@@ -115,19 +94,10 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
             }
         }.thenAccept { response ->
             val code = response.statusCode
-            if (code / 100 == 2) {
-                publishFuture.complete(null)
-            } else {
-                publishFuture.completeExceptionally(
-                    Exception("HTTP $code: ${response.statusMessage} - ${String(response.content ?: ByteArray(0))}")
-                )
+            if (code / 100 != 2) {
+                throw Exception("HTTP $code: ${response.statusMessage} - ${String(response.content ?: ByteArray(0))}")
             }
-        }.exceptionally { exception ->
-            publishFuture.completeExceptionally(exception)
-            null
         }
-
-        return publishFuture
     }
 
     override fun close() {
