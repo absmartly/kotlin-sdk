@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
 
@@ -1028,10 +1029,10 @@ class ContextTest {
         context.track("goal1", mapOf("amount" to 125))
         assertEquals(1, context.pendingCount)
 
-        val future = context.publish()
-        try {
-            future.get()
-        } catch (_: Exception) {}
+        val error = assertFailsWith<java.util.concurrent.ExecutionException> {
+            context.publish().get()
+        }
+        assertSame(failure, error.cause)
 
         assertEquals(1, context.pendingCount)
     }
