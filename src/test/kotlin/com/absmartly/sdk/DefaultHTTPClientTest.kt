@@ -1,8 +1,9 @@
 package com.absmartly.sdk
 
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import kotlin.test.Test
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -12,6 +13,9 @@ class DefaultHTTPClientTest {
     fun closeShutdownsDefaultExecutor() {
         val client = DefaultHTTPClient.create()
         client.close()
+        assertFailsWith<RejectedExecutionException> {
+            client.get("http://127.0.0.1:1/context", null, null)
+        }
     }
 
     @Test
