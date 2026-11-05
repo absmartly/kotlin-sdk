@@ -2,6 +2,7 @@ package com.absmartly.sdk
 
 import java.util.concurrent.CountDownLatch
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class FlushRaceConditionTest {
@@ -51,24 +52,24 @@ class FlushRaceConditionTest {
         context.track("goal2", null)
 
         val trackThread = Thread {
-            latch.await()
-            for (i in 0 until 100) {
-                try {
+            try {
+                latch.await()
+                for (i in 0 until 100) {
                     context.track("concurrent_goal_$i", null)
-                } catch (t: Throwable) {
-                    failures.add(t)
                 }
+            } catch (t: Throwable) {
+                failures.add(t)
             }
         }
 
         val flushThread = Thread {
-            latch.await()
-            for (i in 0 until 10) {
-                try {
+            try {
+                latch.await()
+                for (i in 0 until 10) {
                     context.publish().get()
-                } catch (t: Throwable) {
-                    failures.add(t)
                 }
+            } catch (t: Throwable) {
+                failures.add(t)
             }
         }
 
@@ -78,6 +79,8 @@ class FlushRaceConditionTest {
 
         trackThread.join(5000)
         flushThread.join(5000)
+        assertFalse(trackThread.isAlive, "track thread did not finish within 5s")
+        assertFalse(flushThread.isAlive, "flush thread did not finish within 5s")
 
         assertTrue(failures.isEmpty(), "Unexpected concurrent failures: $failures")
         assertTrue(context.pendingCount >= 0)
