@@ -603,10 +603,10 @@ class ContextTest {
     }
 
     @Test
-    fun closedContextReturnsZeroForGetTreatment() {
+    fun closedContextThrowsOnGetTreatment() {
         val context = createContext()
         context.close()
-        assertEquals(0, context.getTreatment("exp_test_ab"))
+        assertFailsWith<IllegalStateException> { context.getTreatment("exp_test_ab") }
     }
 
     @Test
@@ -653,12 +653,13 @@ class ContextTest {
     }
 
     @Test
-    fun closedContextThrowsOnSetCustomAssignment() {
+    fun closedContextAllowsSetCustomAssignment() {
         val context = createContext()
         context.close()
-        assertFailsWith<IllegalStateException> {
-            context.setCustomAssignment("exp", 1)
-        }
+        context.setCustomAssignment("exp", 1)
+        context.setCustomAssignments(mapOf("exp" to 2, "other" to 1))
+        assertTrue(context.isClosed)
+        assertFailsWith<IllegalStateException> { context.getTreatment("exp") }
     }
 
     @Test
@@ -1150,42 +1151,42 @@ class ContextTest {
         assertEquals(2, context.getTreatment("exp_test_ab"))
     }
 
-    // --- Returns defaults when not ready ---
+    // --- D1: reads throw when not ready / finalized (parity with JS _checkReady) ---
+
+    private fun assertAllReadsThrow(context: Context, message: String) {
+        val reads: List<() -> Any?> = listOf(
+            { context.getTreatment("exp_test_ab") },
+            { context.peekTreatment("exp_test_ab") },
+            { context.getVariableValue("banner.border", "default") },
+            { context.peekVariableValue("banner.border", "default") },
+            { context.variableKeys },
+            { context.customFieldKeys },
+            { context.getCustomFieldValue("exp_test_ab", "key") },
+            { context.getCustomFieldValueType("exp_test_ab", "key") },
+        )
+        for (read in reads) {
+            val e = assertFailsWith<IllegalStateException> { read() }
+            assertEquals(message, e.message)
+        }
+    }
 
     @Test
-    fun returnsDefaultsWhenNotReady() {
+    fun readsThrowWhenNotReady() {
         val dataFuture = java.util.concurrent.CompletableFuture<ContextData>()
         val config = ContextConfig.create().setUnits(units)
         val context = Context.create(config, dataFuture, null, null, null, null)
         assertFalse(context.isReady)
-
-        assertEquals(0, context.getTreatment("exp_test_ab"))
-        assertEquals(0, context.peekTreatment("exp_test_ab"))
-        assertEquals("default", context.getVariableValue("banner.border", "default"))
-        assertEquals("default", context.peekVariableValue("banner.border", "default"))
-        assertEquals(emptyList<String>(), context.experiments)
-        assertEquals(emptyMap<String, List<String>>(), context.variableKeys)
-        assertEquals(emptySet<String>(), context.customFieldKeys)
-        assertNull(context.getCustomFieldValue("exp_test_ab", "key"))
-        assertNull(context.getCustomFieldValueType("exp_test_ab", "key"))
+        assertAllReadsThrow(context, "ABsmartly Context is not yet ready.")
+        val e = assertFailsWith<IllegalStateException> { context.experiments }
+        assertEquals("ABsmartly Context is not yet ready.", e.message)
     }
 
-    // --- Returns defaults when closed ---
-
     @Test
-    fun returnsDefaultsWhenClosed() {
+    fun readsThrowWhenClosed() {
         val context = createContext()
         context.close()
         assertTrue(context.isClosed)
-
-        assertEquals(0, context.getTreatment("exp_test_ab"))
-        assertEquals(0, context.peekTreatment("exp_test_ab"))
-        assertEquals("default", context.getVariableValue("banner.border", "default"))
-        assertEquals("default", context.peekVariableValue("banner.border", "default"))
-        assertEquals(emptyList<String>(), context.experiments)
-        assertEquals(emptyMap<String, List<String>>(), context.variableKeys)
-        assertEquals(emptySet<String>(), context.customFieldKeys)
-        assertNull(context.getCustomFieldValue("exp_test_ab", "key"))
-        assertNull(context.getCustomFieldValueType("exp_test_ab", "key"))
+        assertAllReadsThrow(context, "ABsmartly Context is finalized.")
+        assertTrue(context.experiments.isNotEmpty())
     }
 }

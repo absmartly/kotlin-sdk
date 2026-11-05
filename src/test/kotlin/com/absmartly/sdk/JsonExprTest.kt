@@ -229,9 +229,13 @@ class JsonExprTest {
     }
 
     @Test
-    fun mapWithMoreThanOneKeyReturnsNull() {
-        assertFalse(JsonExpr.evaluateBooleanExpr(
+    fun mapWithMoreThanOneKeyUsesFirstKeyLikeJs() {
+        // JS Evaluator only considers the first key of an expression object.
+        assertTrue(JsonExpr.evaluateBooleanExpr(
             mapOf("value" to 1, "extra" to 2), emptyVars
+        ))
+        assertFalse(JsonExpr.evaluateBooleanExpr(
+            mapOf("extra" to 2, "value" to 1), emptyVars
         ))
     }
 }

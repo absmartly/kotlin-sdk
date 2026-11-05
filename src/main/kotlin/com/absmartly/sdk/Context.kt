@@ -6,12 +6,15 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantReadWriteLock
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class Context private constructor(
-    private val units: MutableMap<String, String>,
+    private val units: MutableMap<String, Any>,
     private val eventLogger: ContextEventLogger?,
     private val eventHandler: ContextPublisher?,
     private val dataProvider: ContextDataProvider?,
@@ -22,12 +25,12 @@ class Context private constructor(
 
     constructor(
         data: ContextData,
-        units: MutableMap<String, String>,
+        units: Map<String, Any>,
         options: ContextOptions,
         eventLogger: ContextEventLogger? = null,
         startReady: Boolean = true
     ) : this(
-        units = units,
+        units = HashMap(units),
         eventLogger = eventLogger,
         eventHandler = null,
         dataProvider = null,
@@ -55,8 +58,7 @@ class Context private constructor(
             eventLogger: ContextEventLogger?,
             scheduler: ScheduledExecutorService?
         ): Context {
-            val units = mutableMapOf<String, String>()
-            config.getUnits()?.let { units.putAll(it) }
+            val units = mutableMapOf<String, Any>()
 
             val configLogger = config.eventLogger ?: eventLogger
 
@@ -70,40 +72,40 @@ class Context private constructor(
                 scheduler = scheduler
             )
 
+            config.getUnits()?.let { context.setUnits(it) }
             config.getOverrides()?.forEach { (k, v) -> context.overrides[k] = v }
             config.getCustomAssignments()?.forEach { (k, v) -> context.cassignments[k] = v }
             config.getAttributes()?.forEach { (k, v) ->
                 context.setAttribute(k, v)
             }
 
-            if (dataFuture.isDone) {
-                val readyFuture = CompletableFuture<Void>()
-                context.readyFuture_.set(readyFuture)
-                dataFuture.thenAccept { data ->
-                    context.setData(data)
-                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
-                    rf?.complete(null)
-                    context.logEvent(ContextEventLogger.EventType.Ready, data)
-                }.exceptionally { exception ->
-                    context.setDataFailed(exception)
-                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
-                    rf?.complete(null)
-                    null
+            val readyFuture = CompletableFuture<Void>()
+            context.readyFuture_.set(readyFuture)
+            dataFuture.thenAccept { data ->
+                // While closing, the data is still applied: a close whose final publish fails reopens the context.
+                if (context.closed_.get()) {
+                    context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
+                    return@thenAccept
                 }
-            } else {
-                val readyFuture = CompletableFuture<Void>()
-                context.readyFuture_.set(readyFuture)
-                dataFuture.thenAccept { data ->
-                    context.setData(data)
-                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
-                    rf?.complete(null)
-                    context.logEvent(ContextEventLogger.EventType.Ready, data)
-                }.exceptionally { exception ->
-                    context.setDataFailed(exception)
-                    val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
-                    rf?.complete(null)
-                    null
+                synchronized(context.refreshLock_) {
+                    if (context.appliedRefreshSeq_ == 0L) context.setData(data)
                 }
+                context.logEvent(ContextEventLogger.EventType.Ready, data)
+                val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                rf?.complete(null)
+                context.startTimers()
+            }.exceptionally { exception ->
+                if (context.closed_.get()) {
+                    context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
+                    return@exceptionally null
+                }
+                synchronized(context.refreshLock_) {
+                    if (context.appliedRefreshSeq_ == 0L) context.setDataFailed(exception)
+                }
+                val rf = context.readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)
+                rf?.complete(null)
+                context.startTimers()
+                null
             }
 
             return context
@@ -132,6 +134,16 @@ class Context private constructor(
     private val closed_ = AtomicBoolean(false)
     private val closing_ = AtomicBoolean(false)
 
+    private val lifecycleLock_ = ReentrantReadWriteLock()
+    @Volatile private var publishTask_: ScheduledFuture<*>? = null
+    @Volatile private var refreshTask_: ScheduledFuture<*>? = null
+
+    @Volatile private var scheduledRefresh_: CompletableFuture<Void>? = null
+    private val inFlight_: MutableSet<CompletableFuture<Void>> = ConcurrentHashMap.newKeySet()
+    private val refreshSeq_ = java.util.concurrent.atomic.AtomicLong(0)
+    private val refreshLock_ = Any()
+    private var appliedRefreshSeq_ = 0L
+
     private val attrsSeq_ = AtomicInteger(0)
     private val pendingCount_ = AtomicInteger(0)
 
@@ -144,6 +156,14 @@ class Context private constructor(
         var name: String = ""
         var unitType: String? = null
         var trafficSplit: DoubleArray = doubleArrayOf()
+        var split: DoubleArray = doubleArrayOf()
+        var seedHi: Int = 0
+        var seedLo: Int = 0
+        var trafficSeedHi: Int = 0
+        var trafficSeedLo: Int = 0
+        var variantConfigs: List<String?> = emptyList()
+        var audience: String? = null
+        var audienceStrict: Boolean = false
         var variant: Int = 0
         var assigned: Boolean = false
         var overridden: Boolean = false
@@ -172,21 +192,52 @@ class Context private constructor(
 
     fun readyError(): Throwable? = readyError_
 
-    fun getUnits(): Map<String, String> = HashMap(units)
-
-    fun getAttributes(): Map<String, Any?> {
-        val result = mutableMapOf<String, Any?>()
-        synchronized(attributes_) {
-            for (attr in attributes_) {
-                result[attr.name] = attr.value
+    private fun startTimers() {
+        val sched = scheduler ?: return
+        synchronized(this) {
+            if (closed_.get() || closing_.get() || publishTask_ != null || refreshTask_ != null) return
+            if (publishDelay > 0) {
+                publishTask_ = sched.scheduleWithFixedDelay({
+                    try {
+                        if (!closed_.get() && !closing_.get() && pendingCount_.get() > 0) flush()
+                    } catch (_: Exception) {
+                    }
+                }, publishDelay, publishDelay, TimeUnit.MILLISECONDS)
+            }
+            if (refreshInterval > 0) {
+                refreshTask_ = sched.scheduleWithFixedDelay({
+                    try {
+                        if (!closed_.get() && !closing_.get()) {
+                            val prev = scheduledRefresh_
+                            if (prev == null || prev.isDone) {
+                                val f = refresh()
+                                scheduledRefresh_ = f
+                            }
+                        }
+                    } catch (e: Exception) {
+                        logEvent(ContextEventLogger.EventType.Error, e)
+                    }
+                }, refreshInterval, refreshInterval, TimeUnit.MILLISECONDS)
             }
         }
-        return result
     }
 
-    fun setUnits(newUnits: Map<String, String>) {
+    private fun stopTimers() {
+        synchronized(this) {
+            publishTask_?.cancel(false)
+            refreshTask_?.cancel(false)
+            publishTask_ = null
+            refreshTask_ = null
+        }
+    }
+
+    fun getUnits(): Map<String, Any> = HashMap(units)
+
+    fun getAttributes(): Map<String, Any?> = buildAttributesMap()
+
+    fun setUnits(newUnits: Map<String, Any>) {
         for ((k, v) in newUnits) {
-            setUnit(k, v)
+            setUnitValue(k, v)
         }
     }
 
@@ -232,13 +283,13 @@ class Context private constructor(
 
     val experiments: List<String>
         get() {
-            if (!ready_ || closed_.get() || closing_.get()) return emptyList()
+            checkReady(false)
             return data.experiments.map { it.name }
         }
 
     val variableKeys: Map<String, List<String>>
         get() {
-            if (!ready_ || closed_.get() || closing_.get()) return emptyMap()
+            checkReady(true)
             val result = mutableMapOf<String, List<String>>()
             for ((key, exps) in indexVariables_) {
                 result[key] = exps.map { it.data.name }
@@ -248,7 +299,7 @@ class Context private constructor(
 
     val customFieldKeys: Set<String>
         get() {
-            if (!ready_ || closed_.get() || closing_.get()) return emptySet()
+            checkReady(true)
             val keys = mutableSetOf<String>()
             for (experiment in data.experiments) {
                 experiment.customFieldValues?.forEach { keys.add(it.name) }
@@ -256,20 +307,44 @@ class Context private constructor(
             return keys
         }
 
-    fun setUnit(unitType: String, uid: String) {
+    fun setUnit(unitType: String, uid: String) = setUnitValue(unitType, uid)
+
+    // Numeric UIDs keep their type, as in the JavaScript SDK; they hash as their rounded integer form.
+    fun setUnit(unitType: String, uid: Number) = setUnitValue(unitType, uid)
+
+    private fun setUnitValue(unitType: String, uid: Any) {
         checkNotClosed()
-        val uidStr = uid.trim()
+        val value: Any = when (uid) {
+            is String -> {
+                val trimmed = uid.trim()
+                if (trimmed.isEmpty()) {
+                    throw IllegalArgumentException("Unit '$unitType' UID must not be blank.")
+                }
+                trimmed
+            }
+            is Number -> uid
+            else -> throw IllegalArgumentException("Unit '$unitType' must be a string or a number.")
+        }
         val previous = units[unitType]
-        if (previous != null && previous != uidStr) {
-            throw IllegalArgumentException("Unit '$unitType' UID already set.")
+        if (previous != null) {
+            if (!sameUid(previous, value)) throw IllegalArgumentException("Unit '$unitType' UID already set.")
+            // An equal reset keeps the stored value, which the cached unit hash was computed from.
+            return
         }
-        if (uidStr.isEmpty()) {
-            throw IllegalArgumentException("Unit '$unitType' UID must not be blank.")
-        }
-        units[unitType] = uidStr
+        units[unitType] = value
     }
 
-    fun getUnit(unitType: String): String? = units[unitType]
+    // Exact numeric comparison, so distinct large Long ids that share a Double never compare equal.
+    private fun sameUid(a: Any, b: Any): Boolean {
+        if (a is Number && b is Number) {
+            val x = Hashing.exactValue(a)
+            val y = Hashing.exactValue(b)
+            return if (x == null || y == null) a.toDouble().equals(b.toDouble()) else x.compareTo(y) == 0
+        }
+        return a == b
+    }
+
+    fun getUnit(unitType: String): Any? = units[unitType]
 
     fun setAttribute(name: String, value: Any?) {
         checkNotClosed()
@@ -293,12 +368,11 @@ class Context private constructor(
     }
 
     fun setCustomAssignment(experimentName: String, variant: Int) {
-        checkNotClosed()
         cassignments[experimentName] = variant
     }
 
     fun getTreatment(experimentName: String): Int {
-        if (!ready_ || closed_.get() || closing_.get()) return 0
+        checkReady(true)
         val assignment = getAssignment(experimentName)
         if (!assignment.exposed.get()) {
             queueExposure(assignment)
@@ -307,12 +381,12 @@ class Context private constructor(
     }
 
     fun peekTreatment(experimentName: String): Int {
-        if (!ready_ || closed_.get() || closing_.get()) return 0
+        checkReady(true)
         return getAssignment(experimentName).variant
     }
 
     fun getVariableValue(key: String, defaultValue: Any?): Any? {
-        if (!ready_ || closed_.get() || closing_.get()) return defaultValue
+        checkReady(true)
         val assignment = getVariableAssignment(key)
         if (assignment != null && assignment.variables != null) {
             if (!assignment.exposed.get()) {
@@ -326,7 +400,7 @@ class Context private constructor(
     }
 
     fun peekVariableValue(key: String, defaultValue: Any?): Any? {
-        if (!ready_ || closed_.get() || closing_.get()) return defaultValue
+        checkReady(true)
         val assignment = getVariableAssignment(key)
         if (assignment != null && assignment.variables != null) {
             if (assignment.variables!!.containsKey(key)) {
@@ -337,7 +411,7 @@ class Context private constructor(
     }
 
     fun getCustomFieldValue(experimentName: String, key: String): Any? {
-        if (!ready_ || closed_.get() || closing_.get()) return null
+        checkReady(true)
         val experiment = index_[experimentName] ?: return null
         val field = experiment.data.customFieldValues?.find { it.name == key } ?: return null
         if (field.value == null) return null
@@ -363,21 +437,27 @@ class Context private constructor(
     }
 
     fun getCustomFieldValueType(experimentName: String, key: String): String? {
-        if (!ready_ || closed_.get() || closing_.get()) return null
+        checkReady(true)
         val experiment = index_[experimentName] ?: return null
         val field = experiment.data.customFieldValues?.find { it.name == key } ?: return null
         return field.type
     }
 
     fun track(goalName: String, properties: Map<String, Any?>?) {
-        checkNotClosed()
         val achievement = GoalAchievement(
             name = goalName,
             achievedAt = System.currentTimeMillis(),
             properties = properties?.let { java.util.TreeMap(it) }
         )
-        achievements_.add(achievement)
-        pendingCount_.incrementAndGet()
+        val lock = lifecycleLock_.readLock()
+        lock.lock()
+        try {
+            checkNotClosed()
+            achievements_.add(achievement)
+            pendingCount_.incrementAndGet()
+        } finally {
+            lock.unlock()
+        }
         logEvent(ContextEventLogger.EventType.Goal, achievement)
     }
 
@@ -387,16 +467,44 @@ class Context private constructor(
     }
 
     override fun close() {
-        if (!closed_.get() && closing_.compareAndSet(false, true)) {
+        if (closed_.get()) return
+        val wl = lifecycleLock_.writeLock()
+        val won: Boolean
+        wl.lock()
+        try {
+            // Taking the write lock waits for in-flight event producers; later ones see closing_.
+            won = !closed_.get() && closing_.compareAndSet(false, true)
+        } finally {
+            wl.unlock()
+        }
+        if (won) {
+            stopTimers()
+            var failure: Throwable? = null
             try {
                 if (pendingCount_.get() > 0) {
                     flush().join()
                 }
-                closed_.set(true)
-                logEvent(ContextEventLogger.EventType.Close, null)
-            } finally {
-                closing_.set(false)
+            } catch (e: Throwable) {
+                failure = e
             }
+            for (f in inFlight_.toList()) {
+                try {
+                    f.join()
+                } catch (_: Exception) {
+                }
+            }
+            if (failure != null) {
+                // A failed final publish leaves the events queued and the context open, so close() can be retried.
+                closing_.set(false)
+                startTimers()
+                val cause = if (failure is java.util.concurrent.CompletionException && failure.cause != null) failure.cause!! else failure
+                throw cause
+            }
+            // closing_ stays set: isClosing already reports false once closed_ is true, and keeping it
+            // set stops a late close() from winning the CAS again.
+            closed_.set(true)
+            readyFuture_.get()?.let { if (!it.isDone) it.complete(null) }
+            logEvent(ContextEventLogger.EventType.Close, null)
         }
     }
 
@@ -407,23 +515,43 @@ class Context private constructor(
 
     fun setDataAndReady(newData: ContextData) {
         setData(newData)
+        failed_ = false
+        readyError_ = null
         ready_ = true
-        readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
         logEvent(ContextEventLogger.EventType.Ready, newData)
+        readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
     }
 
+    // A context whose initial load failed stays failed: refresh is a successful no-op, like the JavaScript SDK.
     fun refresh(): CompletableFuture<Void> {
-        if (dataProvider == null) {
+        if (dataProvider == null || failed_) {
             return CompletableFuture.completedFuture(null)
         }
+        if (closed_.get() || closing_.get()) return CompletableFuture.completedFuture(null)
+        val seq = refreshSeq_.incrementAndGet()
         return dataProvider.getContextData().thenAccept { newData ->
-            setData(newData)
-            logEvent(ContextEventLogger.EventType.Refresh, newData)
+            applyRefresh(seq, newData)
+        }.whenComplete { _, ex ->
+            if (ex != null) logEvent(ContextEventLogger.EventType.Error, unwrap(ex))
         }
     }
 
     fun refresh(newData: ContextData) {
-        setData(newData)
+        if (failed_ || closed_.get() || closing_.get()) return
+        applyRefresh(refreshSeq_.incrementAndGet(), newData)
+    }
+
+    private fun unwrap(ex: Throwable): Throwable =
+        if (ex is java.util.concurrent.CompletionException && ex.cause != null) ex.cause!! else ex
+
+    private fun applyRefresh(seq: Long, newData: ContextData) {
+        synchronized(refreshLock_) {
+            if (closed_.get() || closing_.get()) return
+            if (seq < refreshSeq_.get() || seq <= appliedRefreshSeq_) return
+            appliedRefreshSeq_ = seq
+            setData(newData)
+            readyFuture_.getAndSet(COMPLETED_VOID_FUTURE)?.complete(null)
+        }
         logEvent(ContextEventLogger.EventType.Refresh, newData)
     }
 
@@ -577,6 +705,14 @@ class Context private constructor(
                 assignment.id = experiment.data.id
                 assignment.iteration = experiment.data.iteration
                 assignment.trafficSplit = experiment.data.trafficSplit
+                assignment.split = experiment.data.split
+                assignment.seedHi = experiment.data.seedHi
+                assignment.seedLo = experiment.data.seedLo
+                assignment.trafficSeedHi = experiment.data.trafficSeedHi
+                assignment.trafficSeedLo = experiment.data.trafficSeedLo
+                assignment.variantConfigs = experiment.data.variants.map { it.config }
+                assignment.audience = experiment.data.audience
+                assignment.audienceStrict = experiment.data.audienceStrict
                 assignment.fullOnVariant = experiment.data.fullOnVariant
                 assignment.attrsSeq = attrsSeq_.get()
             }
@@ -608,7 +744,14 @@ class Context private constructor(
                 experiment.unitType != null && experiment.unitType == assignment.unitType &&
                 experiment.iteration == assignment.iteration &&
                 experiment.fullOnVariant == assignment.fullOnVariant &&
-                experiment.trafficSplit.contentEquals(assignment.trafficSplit)
+                experiment.trafficSplit.contentEquals(assignment.trafficSplit) &&
+                experiment.split.contentEquals(assignment.split) &&
+                experiment.seedHi == assignment.seedHi && experiment.seedLo == assignment.seedLo &&
+                experiment.trafficSeedHi == assignment.trafficSeedHi &&
+                experiment.trafficSeedLo == assignment.trafficSeedLo &&
+                experiment.variants.map { it.config } == assignment.variantConfigs &&
+                experiment.audience == assignment.audience &&
+                experiment.audienceStrict == assignment.audienceStrict
     }
 
     private fun audienceMatches(experiment: Experiment, assignment: Assignment): Boolean {
@@ -626,7 +769,12 @@ class Context private constructor(
     }
 
     private fun queueExposure(assignment: Assignment) {
-        if (assignment.exposed.compareAndSet(false, true)) {
+        val lock = lifecycleLock_.readLock()
+        var publishedExposure: Exposure? = null
+        lock.lock()
+        try {
+            if (closed_.get() || closing_.get()) return
+            if (!assignment.exposed.compareAndSet(false, true)) return
             val exposure = Exposure(
                 id = assignment.id,
                 name = assignment.name,
@@ -642,13 +790,39 @@ class Context private constructor(
             )
             exposures_.add(exposure)
             pendingCount_.incrementAndGet()
-            logEvent(ContextEventLogger.EventType.Exposure, exposure)
+            publishedExposure = exposure
+        } finally {
+            lock.unlock()
         }
+        logEvent(ContextEventLogger.EventType.Exposure, publishedExposure)
     }
 
     private fun flush(): CompletableFuture<Void> {
         if (pendingCount_.get() <= 0) {
             return CompletableFuture.completedFuture(null)
+        }
+        // Registered before draining so close() can never miss a publish that has drained but not yet returned.
+        val placeholder = CompletableFuture<Void>()
+        inFlight_.add(placeholder)
+        placeholder.whenComplete { _, _ -> inFlight_.remove(placeholder) }
+        try {
+            return flushInternal().also { f ->
+                f.whenComplete { _, ex -> if (ex != null) placeholder.completeExceptionally(ex) else placeholder.complete(null) }
+            }
+        } catch (e: Throwable) {
+            placeholder.completeExceptionally(e)
+            throw e
+        }
+    }
+
+    private fun flushInternal(): CompletableFuture<Void> {
+        if (pendingCount_.get() <= 0) {
+            return CompletableFuture.completedFuture(null)
+        }
+
+        // Hashed before the queues are drained, so a hashing failure cannot drop queued events.
+        val unitList = units.map { (type, uid) ->
+            com.absmartly.sdk.Unit(type, String(getUnitHash(type, uid), Charsets.US_ASCII))
         }
 
         val exposureList = mutableListOf<Exposure>()
@@ -665,10 +839,6 @@ class Context private constructor(
         val drained = exposureList.size + goalList.size
         pendingCount_.addAndGet(-drained)
 
-        val unitList = units.map { (type, uid) ->
-            com.absmartly.sdk.Unit(type, String(getUnitHash(type, uid), Charsets.US_ASCII))
-        }
-
         val attrList = synchronized(attributes_) {
             if (attributes_.isEmpty()) null else attributes_.toList()
         }
@@ -682,27 +852,35 @@ class Context private constructor(
             attributes = attrList
         )
 
-        logEvent(ContextEventLogger.EventType.Publish, event)
-
+        // Like the JavaScript SDK, the publish event is logged once the batch is delivered.
         if (eventHandler != null) {
-            return eventHandler.publish(this, event).whenComplete { _, exception ->
-                if (exception != null) {
-                    for (exposure in exposureList) {
-                        exposures_.add(exposure)
-                    }
-                    for (goal in goalList) {
-                        achievements_.add(goal)
-                    }
-                    pendingCount_.addAndGet(drained)
-                    logEvent(ContextEventLogger.EventType.Error, exception)
+            val requeue = { exception: Throwable ->
+                for (exposure in exposureList) {
+                    exposures_.add(exposure)
                 }
+                for (goal in goalList) {
+                    achievements_.add(goal)
+                }
+                pendingCount_.addAndGet(drained)
+                logEvent(ContextEventLogger.EventType.Error, exception)
             }
+            val future = try {
+                eventHandler.publish(this, event)
+            } catch (e: Exception) {
+                requeue(e)
+                return CompletableFuture<Void>().also { it.completeExceptionally(e) }
+            }
+            val tracked = future.whenComplete { _, exception ->
+                if (exception != null) requeue(exception) else logEvent(ContextEventLogger.EventType.Publish, event)
+            }
+            return tracked
         }
 
+        logEvent(ContextEventLogger.EventType.Publish, event)
         return CompletableFuture.completedFuture(null)
     }
 
-    private fun getUnitHash(unitType: String, uid: String): ByteArray {
+    private fun getUnitHash(unitType: String, uid: Any): ByteArray {
         return hashedUnits_.computeIfAbsent(unitType) {
             Hashing.hashUnit(uid)
         }
@@ -738,6 +916,6 @@ class Context private constructor(
 
     private fun checkNotClosed() {
         if (closed_.get()) throw IllegalStateException("ABsmartly Context is finalized.")
-        if (closing_.get()) throw IllegalStateException("ABsmartly Context is closing.")
+        if (closing_.get()) throw IllegalStateException("ABsmartly Context is finalizing.")
     }
 }

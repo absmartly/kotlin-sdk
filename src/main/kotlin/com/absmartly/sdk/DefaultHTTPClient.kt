@@ -21,10 +21,12 @@ class DefaultHTTPClient private constructor(private val executor: Executor) : HT
         fun create(): DefaultHTTPClient {
             val maxThreads = Runtime.getRuntime().availableProcessors() * 2
             val executor = ThreadPoolExecutor(
-                0, maxThreads,
+                maxThreads, maxThreads,
                 60L, TimeUnit.SECONDS,
                 LinkedBlockingQueue()
             )
+            // An unbounded queue never grows the pool past core size, so use core == max and let idle threads expire.
+            executor.allowCoreThreadTimeOut(true)
             return DefaultHTTPClient(executor)
         }
 
