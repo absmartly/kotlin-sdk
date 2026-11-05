@@ -10,7 +10,13 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
     companion object {
         @JvmStatic
         fun create(config: ClientConfig): Client {
-            return Client(config, DefaultHTTPClient.create())
+            val httpClient = DefaultHTTPClient.create()
+            try {
+                return Client(config, httpClient)
+            } catch (e: Throwable) {
+                httpClient.close()
+                throw e
+            }
         }
 
         @JvmStatic
