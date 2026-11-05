@@ -4,7 +4,7 @@ A/B Smartly - Kotlin SDK
 
 ## Compatibility
 
-The A/B Smartly Kotlin SDK is compatible with Kotlin 1.6 and later, running on JVM 11+. It uses [Jackson](https://github.com/FasterXML/jackson) for JSON serialization and provides a thread-safe API using `ConcurrentHashMap` and atomic operations.
+The A/B Smartly Kotlin SDK is built with Kotlin 1.9.22 and requires Kotlin 1.9 or later in consuming projects, running on JVM 11+. It uses [Jackson](https://github.com/FasterXML/jackson) for JSON serialization and provides a thread-safe API using `ConcurrentHashMap` and atomic operations.
 
 ### Android
 
@@ -129,21 +129,19 @@ context.waitUntilReadyAsync().thenAccept { ctx ->
 }
 ```
 
-#### Direct Construction
+#### Using Data You Fetched Yourself
 
-For simpler use cases where you manage data fetching yourself:
+If you manage data fetching yourself, pass the data to `createContextWith()` so the context is still wired to the SDK's publisher and data provider:
 
 ```kotlin
 val contextData: ContextData = fetchContextData()
 
-val units = mutableMapOf("session_id" to "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
-val options = ContextOptions(publishDelay = -1, refreshPeriod = 0)
+val contextConfig = ContextConfig.create()
+    .setUnit("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
+    .setPublishDelay(-1)
+    .setRefreshInterval(0)
 
-val context = Context(
-    data = contextData,
-    units = units,
-    options = options,
-)
+val context = sdk.createContextWith(contextConfig, contextData)
 ```
 
 #### With Event Logger
@@ -232,17 +230,14 @@ val anotherContext = sdk.createContextWith(
 assert(anotherContext.isReady)
 ```
 
-### Direct Construction (Manual Data Fetching)
+### Manual Data Fetching
 
 ```kotlin
 val contextData: ContextData = fetchContextData()
-val units = mutableMapOf("session_id" to "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
-val options = ContextOptions()
 
-val context = Context(
-    data = contextData,
-    units = units,
-    options = options,
+val context = sdk.createContextWith(
+    ContextConfig.create().setUnit("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8"),
+    contextData
 )
 
 assert(context.isReady)
@@ -386,8 +381,10 @@ context.track("page_view", null)
 Sometimes it is necessary to ensure all events have been published to the A/B Smartly collector, before proceeding. You can explicitly call the `publish()` method.
 
 ```kotlin
-context.publish()
+context.publish().get()
 ```
+
+`publish()` returns a `CompletableFuture<Void>`; wait on it (`get()`/`join()`) or chain on it before relying on the events having been sent.
 
 ### Closing
 
@@ -447,11 +444,11 @@ class CustomEventLogger : ContextEventLogger {
 Usage:
 
 ```kotlin
-val context = Context(
-    data = contextData,
-    units = mutableMapOf("session_id" to "abc123"),
-    options = ContextOptions(),
-    eventLogger = CustomEventLogger(),
+val context = sdk.createContextWith(
+    ContextConfig.create()
+        .setUnit("session_id", "abc123")
+        .setEventLogger(CustomEventLogger()),
+    contextData
 )
 ```
 
@@ -481,13 +478,13 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val sdk = getABsmartly() // your app-wide ABsmartly instance
         val contextData = fetchContextData()
         val deviceId = getDeviceId()
 
-        context = Context(
-            data = contextData,
-            units = mutableMapOf("device_id" to deviceId),
-            options = ContextOptions(),
+        context = sdk.createContextWith(
+            ContextConfig.create().setUnit("device_id", deviceId),
+            contextData
         )
 
         val treatment = context.getTreatment("exp_button_color")
@@ -517,15 +514,14 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.server.sessions.*
 
-fun Application.configureRouting(contextData: ContextData) {
+fun Application.configureRouting(sdk: ABsmartly, contextData: ContextData) {
     routing {
         get("/product") {
             val sessionId = call.sessions.get<UserSession>()?.id ?: "anonymous"
 
-            val context = Context(
-                data = contextData,
-                units = mutableMapOf("session_id" to sessionId),
-                options = ContextOptions(),
+            val context = sdk.createContextWith(
+                ContextConfig.create().setUnit("session_id", sessionId),
+                contextData
             )
 
             val treatment = context.getTreatment("exp_product_layout")
