@@ -63,7 +63,7 @@ class ContextSystemAttributesTest {
     private fun eqFilter(variable: String, value: String): String =
         """{"filter":[{"eq":[{"var":"$variable"},{"value":"$value"}]}]}"""
 
-    // §4.1 Strict audience on the environment matches -> variant 1, no mismatch.
+    // §4.1 Strict audience on the environment matches.
     @Test
     fun strictEnvironmentAudienceMatches() {
         val context = contextWith(eqFilter("environment", "production"))
@@ -72,7 +72,7 @@ class ContextSystemAttributesTest {
         context.publish()
     }
 
-    // §4.2 Strict audience on the application matches -> variant 1.
+    // §4.2 Strict audience on the application matches.
     @Test
     fun strictApplicationAudienceMatches() {
         val context = contextWith(eqFilter("application", "website"))
