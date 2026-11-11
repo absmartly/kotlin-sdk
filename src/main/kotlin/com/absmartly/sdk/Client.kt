@@ -32,6 +32,10 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
     private var deserializer: ContextDataDeserializer
     private var serializer: ContextEventSerializer
 
+    // The configured application and environment names, made available to audiences and rule conditions.
+    val application: String
+    val environment: String
+
     init {
         val endpoint = config.endpoint
         require(!endpoint.isNullOrEmpty()) { "Missing Endpoint configuration" }
@@ -54,6 +58,9 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
 
         val environment = config.environment
         require(!environment.isNullOrEmpty()) { "Missing Environment configuration" }
+
+        this.application = application
+        this.environment = environment
 
         url = "$endpoint/context"
         executor = config.executor

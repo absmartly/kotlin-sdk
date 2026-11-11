@@ -20,7 +20,11 @@ class Context private constructor(
     private val dataProvider: ContextDataProvider?,
     private val publishDelay: Long,
     private val refreshInterval: Long,
-    private val scheduler: ScheduledExecutorService?
+    private val scheduler: ScheduledExecutorService?,
+    // Non-empty application and environment names from the client config, which the collector also attaches
+    // to every exposure server-side, so audiences and rule conditions can target them. Null/empty means unset.
+    private val applicationName: String?,
+    private val environmentName: String?
 ) : Closeable {
 
     constructor(
@@ -28,7 +32,9 @@ class Context private constructor(
         units: Map<String, Any>,
         options: ContextOptions,
         eventLogger: ContextEventLogger? = null,
-        startReady: Boolean = true
+        startReady: Boolean = true,
+        application: String? = null,
+        environment: String? = null
     ) : this(
         units = HashMap(units),
         eventLogger = eventLogger,
@@ -36,7 +42,9 @@ class Context private constructor(
         dataProvider = null,
         publishDelay = options.publishDelay,
         refreshInterval = options.refreshPeriod,
-        scheduler = null
+        scheduler = null,
+        applicationName = application,
+        environmentName = environment
     ) {
         if (startReady) {
             setData(data)
@@ -56,7 +64,9 @@ class Context private constructor(
             dataProvider: ContextDataProvider?,
             eventHandler: ContextPublisher?,
             eventLogger: ContextEventLogger?,
-            scheduler: ScheduledExecutorService?
+            scheduler: ScheduledExecutorService?,
+            application: String? = null,
+            environment: String? = null
         ): Context {
             val units = mutableMapOf<String, Any>()
 
@@ -69,7 +79,9 @@ class Context private constructor(
                 dataProvider = dataProvider,
                 publishDelay = config.publishDelay,
                 refreshInterval = config.refreshInterval,
-                scheduler = scheduler
+                scheduler = scheduler,
+                applicationName = application,
+                environmentName = environment
             )
 
             config.getUnits()?.let { context.setUnits(it) }
@@ -659,7 +671,7 @@ class Context private constructor(
                 val unitType = experiment.data.unitType
 
                 if (experiment.data.audience != null && experiment.data.audience!!.isNotEmpty()) {
-                    val attrs = buildAttributesMap()
+                    val attrs = buildEvaluationAttributesMap()
                     val match = audienceMatcher.evaluate(experiment.data.audience!!, attrs)
                     if (match != null) {
                         assignment.audienceMismatch = !match.value
@@ -757,7 +769,7 @@ class Context private constructor(
     private fun audienceMatches(experiment: Experiment, assignment: Assignment): Boolean {
         if (experiment.audience != null && experiment.audience!!.isNotEmpty()) {
             if (attrsSeq_.get() > assignment.attrsSeq) {
-                val attrs = buildAttributesMap()
+                val attrs = buildEvaluationAttributesMap()
                 val match = audienceMatcher.evaluate(experiment.audience!!, attrs)
                 val newAudienceMismatch = if (match != null) !match.value else false
                 if (newAudienceMismatch != assignment.audienceMismatch) {
@@ -900,6 +912,28 @@ class Context private constructor(
             }
         }
         return result
+    }
+
+    // Variables available to audience filters and assignment-rule conditions. The configured application and
+    // environment names (which the collector also attaches to every exposure server-side) are always available
+    // and are put first, so a user attribute of the same name overrides them, including one set after an
+    // assignment was cached (the attrsSeq_ bump invalidates it). Null or empty names are left out.
+    internal fun buildEvaluationAttributesMap(): Map<String, Any?> {
+        val result = mutableMapOf<String, Any?>()
+        putIfNotEmpty(result, "application", applicationName)
+        putIfNotEmpty(result, "environment", environmentName)
+        synchronized(attributes_) {
+            for (attr in attributes_) {
+                result[attr.name] = attr.value
+            }
+        }
+        return result
+    }
+
+    private fun putIfNotEmpty(map: MutableMap<String, Any?>, key: String, value: String?) {
+        if (!value.isNullOrEmpty()) {
+            map[key] = value
+        }
     }
 
     private fun logEvent(type: ContextEventLogger.EventType, data: Any?) {
