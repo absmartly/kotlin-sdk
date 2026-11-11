@@ -13,6 +13,9 @@ No version bump: the SDK has never been released (no tags, nothing published), s
 ### Added
 
 - `Hashing.utf8Bytes` and `Hashing.base64UrlNoPadding`, the encoders used for unit hashing.
+- Audiences and assignment-rule conditions now always see the configured `application` and `environment` names (the same names the collector attaches to every exposure server-side). The values are overlaid by any user attribute of the same name, including one set after an assignment was cached (the cache is invalidated). Empty or unset names are left out. Nothing new is published: the collector already adds `application` and `environment` server-side. `app_version` is not provided.
+
+  This changes assignment for running experiments. A unit whose experiment has Audience enforced and an `environment` or `application` condition currently gets variant 0, because the SDK never supplied those attributes, so a strict audience always mismatched. After upgrading, that unit is randomised normally. Those experiments are broken today; this fixes them, but the assignment they produce will change.
 
 ### BREAKING
 

@@ -332,6 +332,12 @@ context.setAttribute("user_agent", "Mozilla/5.0...")
 context.setAttribute("customer_age", "new_customer")
 ```
 
+The configured `application` and `environment` names are always available to audience filters and
+assignment-rule conditions, even when you set no attributes. A user attribute of the same name overrides
+the configured value, including one set after an assignment was cached. These values are added only to the
+local evaluation map; the collector already attaches them to every exposure server-side, so nothing extra
+is published.
+
 ### Custom Assignments
 
 ```kotlin
