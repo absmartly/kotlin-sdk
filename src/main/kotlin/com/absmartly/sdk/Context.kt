@@ -652,7 +652,7 @@ class Context private constructor(
                 if (!cached.assigned) {
                     return cached
                 }
-            } else if (custom == null || custom == cached.variant) {
+            } else if (custom == null || cached.ruleOverride || custom == cached.variant) {
                 if (experimentMatches(experiment.data, cached) && audienceMatches(experiment.data, cached) &&
                     (experiment.data.assignmentRules.isNullOrEmpty() || attrsSeq_.get() == cached.attrsSeq)) {
                     return cached

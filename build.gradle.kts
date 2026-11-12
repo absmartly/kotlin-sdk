@@ -21,7 +21,14 @@ publishing {
             from(components["java"])
             groupId = "com.absmartly"
             artifactId = "absmartly-sdk-kotlin"
-            version = providers.gradleProperty("versionName").orElse("1.0.0").get()
+            pom {
+                name.set("ABsmartly Kotlin SDK")
+                description.set("ABsmartly SDK for Kotlin")
+                url.set("https://github.com/absmartly/kotlin-sdk")
+                licenses { license { name.set("MIT License"); url.set("https://opensource.org/licenses/MIT") } }
+                developers { developer { id.set("absmartly"); name.set("ABsmartly"); url.set("https://www.absmartly.com") } }
+                scm { url.set("https://github.com/absmartly/kotlin-sdk"); connection.set("scm:git:https://github.com/absmartly/kotlin-sdk.git"); developerConnection.set("scm:git:ssh://git@github.com/absmartly/kotlin-sdk.git") }
+            }
         }
     }
 }
