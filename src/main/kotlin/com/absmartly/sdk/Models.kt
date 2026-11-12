@@ -3,6 +3,11 @@ package com.absmartly.sdk
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.core.JsonParser
+import com.fasterxml.jackson.core.JsonToken
+import com.fasterxml.jackson.databind.DeserializationContext
+import com.fasterxml.jackson.databind.JsonDeserializer
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -29,8 +34,23 @@ class Experiment(
     @JsonProperty("audienceStrict") var audienceStrict: Boolean = false,
     @JsonProperty("audience") var audience: String? = null,
     @JsonProperty("customFieldValues") var customFieldValues: List<CustomFieldValue>? = null,
-    @JsonProperty("assignmentRules") var assignmentRules: String? = null
+    @JsonProperty("assignmentRules")
+    @JsonDeserialize(using = AssignmentRulesDeserializer::class)
+    var assignmentRules: String? = null
 )
+
+// assignmentRules is a JSON string. An object or array sent in its place is ignored (null) instead of failing the
+// whole context, so only that experiment's rules are skipped.
+internal class AssignmentRulesDeserializer : JsonDeserializer<String?>() {
+    override fun deserialize(p: JsonParser, ctxt: DeserializationContext): String? {
+        val token = p.currentToken
+        if (token == JsonToken.START_OBJECT || token == JsonToken.START_ARRAY) {
+            p.skipChildren()
+            return null
+        }
+        return if (token.isScalarValue) p.valueAsString else null
+    }
+}
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)

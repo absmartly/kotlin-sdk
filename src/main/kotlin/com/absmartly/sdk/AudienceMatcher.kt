@@ -8,32 +8,85 @@ internal class AudienceMatcher {
     data class RuleAction(val variant: Int?, val split: DoubleArray?)
     data class Result(val value: Boolean)
 
-    fun evaluateRules(rulesJson: String?, environment: String?, attributes: Map<String, Any?>): RuleAction? {
+    // Parses an assignmentRules JSON string ({"rules": [...]}); null when it is empty, invalid or has no rule list.
+    fun parseRules(rulesJson: String?): List<*>? {
         if (rulesJson.isNullOrEmpty()) return null
         return try {
-            val root = objectMapper.readValue(rulesJson, Map::class.java)
-            val rules = root["rules"] as? List<*> ?: return null
-            for (entry in rules) {
-                val rule = entry as? Map<*, *> ?: continue
-                val action = when (rule["type"]) {
-                    "assign" -> (rule["variant"] as? Number)?.toDouble()?.takeIf { it.isFinite() && it == kotlin.math.floor(it) }?.let { RuleAction(it.toInt(), null) }
-                    "split" -> parseSplit(rule["percentages"] as? String)
-                    else -> null
-                } ?: continue
-                val envs = rule["environments"]
-                if (envs != null && (envs !is List<*> || (envs.isNotEmpty() && !envs.contains(environment)))) continue
-                val conditions = rule["conditions"]
-                if (conditions == null || (conditions is Map<*, *> && JsonExpr.evaluateBooleanExpr(conditions, attributes))) return action
-            }
+            objectMapper.readValue(rulesJson, Map::class.java)["rules"] as? List<*>
+        } catch (_: Exception) {
             null
-        } catch (_: Exception) { null }
+        }
     }
 
+    fun evaluateRules(rulesJson: String?, environment: String?, attributes: Map<String, Any?>): RuleAction? {
+        return evaluateParsedRules(parseRules(rulesJson) ?: return null, environment, attributes)
+    }
+
+    fun evaluateParsedRules(rules: List<*>, environment: String?, attributes: Map<String, Any?>): RuleAction? {
+        for (entry in rules) {
+            val rule = entry as? Map<*, *> ?: continue
+            val action = when (rule["type"]) {
+                "assign" -> (rule["variant"] as? Number)?.toDouble()
+                    ?.takeIf { it.isFinite() && it == kotlin.math.floor(it) && it <= Int.MAX_VALUE && it >= Int.MIN_VALUE }
+                    ?.let { RuleAction(it.toInt(), null) }
+                "split" -> parseSplit(rule["percentages"] as? String)
+                else -> null
+            } ?: continue
+            val envs = rule["environments"]
+            if (envs != null && (envs !is List<*> || (envs.isNotEmpty() && !envs.contains(environment)))) continue
+            // Like the JavaScript and Java SDKs, conditions must be an object; anything else skips the rule.
+            val conditions = rule["conditions"] ?: return action
+            if (conditions !is Map<*, *>) continue
+            // A condition that fails to evaluate skips only its own rule.
+            val matched = try {
+                JsonExpr.evaluateBooleanExpr(conditions, attributes)
+            } catch (_: Exception) {
+                false
+            } catch (_: StackOverflowError) {
+                false
+            }
+            if (matched) return action
+        }
+        return null
+    }
+
+    // Same check as the backend's experiment split: percentages are read with JavaScript parseFloat semantics and
+    // the gap from 100, rounded half up to two decimals like toFixed(2), must be within 0.01.
     private fun parseSplit(value: String?): RuleAction? {
         if (value == null) return null
-        val nums = value.split('/').map { it.trim().toDoubleOrNull() ?: return null }
-        if (nums.isEmpty() || nums.any { !it.isFinite() || it < 0.0 } || !nums.sum().isFinite() || kotlin.math.abs(nums.sum() - 100.0) > 0.01) return null
+        val nums = value.split('/').map { parseFloat(it) }
+        if (nums.any { it.isNaN() || it < 0.0 }) return null
+        val gap = kotlin.math.abs(100.0 - nums.sum())
+        if (!gap.isFinite()) return null
+        if (java.math.BigDecimal(gap).setScale(2, java.math.RoundingMode.HALF_UP).toDouble() > 0.01) return null
         return RuleAction(null, nums.map { it / 100.0 }.toDoubleArray())
+    }
+
+    // JavaScript parseFloat: leading whitespace is skipped and the longest valid decimal prefix is read, so "50abc"
+    // is 50 and "abc" is NaN.
+    internal fun parseFloat(s: String): Double {
+        var i = 0
+        val n = s.length
+        while (i < n && s[i].isWhitespace()) i++
+        val start = i
+        if (i < n && (s[i] == '+' || s[i] == '-')) i++
+        if (s.startsWith("Infinity", i)) return if (s[start] == '-') Double.NEGATIVE_INFINITY else Double.POSITIVE_INFINITY
+        var digits = false
+        while (i < n && s[i] in '0'..'9') { i++; digits = true }
+        if (i < n && s[i] == '.') {
+            i++
+            while (i < n && s[i] in '0'..'9') { i++; digits = true }
+        }
+        if (!digits) return Double.NaN
+        var end = i
+        if (i < n && (s[i] == 'e' || s[i] == 'E')) {
+            var j = i + 1
+            if (j < n && (s[j] == '+' || s[j] == '-')) j++
+            val expStart = j
+            while (j < n && s[j] in '0'..'9') j++
+            if (j > expStart) end = j
+        }
+        return s.substring(start, end).toDouble()
     }
 
     fun evaluate(audience: String, attributes: Map<String, Any?>): Result? {

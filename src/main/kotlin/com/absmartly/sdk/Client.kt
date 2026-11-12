@@ -8,6 +8,8 @@ import java.util.concurrent.ForkJoinPool
 class Client private constructor(config: ClientConfig, private val httpClient: HTTPClient) : Closeable {
 
     companion object {
+        internal fun applicationVersionHeader(version: String): String =
+            if (version.isNotEmpty() && version.length <= 18 && version.all { it in '0'..'9' }) version else "0"
         @JvmStatic
         fun create(config: ClientConfig): Client {
             val httpClient = DefaultHTTPClient.create()
@@ -75,7 +77,9 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
             "X-API-Key" to apiKey,
             "X-Application" to application,
             "X-Environment" to environment,
-            "X-Application-Version" to applicationVersion.toLongOrNull()?.toString().orEmpty().ifEmpty { "0" },
+            // The collector parses this header as a whole number and rejects anything else, so a version such as
+            // "2.4.1" is sent as "0"; the full version is still used for the app_version system attribute.
+            "X-Application-Version" to applicationVersionHeader(applicationVersion),
             "X-Agent" to SdkVersion.AGENT
         )
 
