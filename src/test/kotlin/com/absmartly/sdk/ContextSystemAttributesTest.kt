@@ -60,7 +60,7 @@ class ContextSystemAttributesTest {
     private fun eqFilter(variable: String, value: String): String =
         """{"filter":[{"eq":[{"var":"$variable"},{"value":"$value"}]}]}"""
 
-    // §4.1 Strict audience on the environment matches.
+    // A strict audience on the environment matches.
     @Test
     fun strictEnvironmentAudienceMatches() {
         val context = contextWith(eqFilter("environment", "production"))
@@ -69,14 +69,14 @@ class ContextSystemAttributesTest {
         context.publish()
     }
 
-    // §4.2 Strict audience on the application matches.
+    // A strict audience on the application matches.
     @Test
     fun strictApplicationAudienceMatches() {
         val context = contextWith(eqFilter("application", "website"))
         assertEquals(1, context.peekTreatment("exp_system"))
     }
 
-    // §4.3 No match -> variant 0, audienceMismatch true (observed on the published exposure).
+    // No match gives variant 0 and a published audienceMismatch.
     @Test
     fun noMatchGivesVariantZeroAndMismatch() {
         val context = contextWith(eqFilter("environment", "staging"))
@@ -96,30 +96,27 @@ class ContextSystemAttributesTest {
         assertTrue(captured[0].audienceMismatch)
     }
 
-    // §4.4 A user value set after creation overrides the system value; the cached assignment is invalidated.
+    // A user value set after creation overrides the system value and invalidates the cached assignment.
     @Test
     fun userAttributeOverridesSystemValueAndInvalidatesCache() {
-        // production filter matches at first (system value), then stops matching after user sets staging.
         val productionContext = contextWith(eqFilter("environment", "production"))
         assertEquals(1, productionContext.peekTreatment("exp_system"))
         productionContext.setAttribute("environment", "staging")
         assertEquals(0, productionContext.peekTreatment("exp_system"))
 
-        // staging filter does not match the system value, then matches after the user sets staging.
         val stagingContext = contextWith(eqFilter("environment", "staging"))
         assertEquals(0, stagingContext.peekTreatment("exp_system"))
         stagingContext.setAttribute("environment", "staging")
         assertEquals(1, stagingContext.peekTreatment("exp_system"))
     }
 
-    // §4.6 No environment configured means no key in the map: the filter does not match and nothing crashes.
+    // With no environment configured the key is absent and the filter does not match.
     @Test
     fun missingEnvironmentLeavesKeyOutAndDoesNotMatch() {
         val context = contextWith(eqFilter("environment", "production"), environment = null)
         assertFalse(context.buildEvaluationAttributesMap().containsKey("environment"))
         assertEquals(0, context.peekTreatment("exp_system"))
 
-        // Empty string is treated the same as unset.
         val emptyContext = contextWith(eqFilter("environment", "production"), environment = "")
         assertFalse(emptyContext.buildEvaluationAttributesMap().containsKey("environment"))
         assertEquals(0, emptyContext.peekTreatment("exp_system"))
@@ -133,7 +130,7 @@ class ContextSystemAttributesTest {
         assertEquals(0, context.peekTreatment("exp_system"))
     }
 
-    // The evaluation map carries the system values first, overlaid by user attributes; getAttributes stays user-only.
+    // getAttributes returns user attributes only.
     @Test
     fun evaluationMapOverlaysUserAttributesButGetAttributesStaysUserOnly() {
         val context = contextWith(audience = null)
@@ -148,7 +145,6 @@ class ContextSystemAttributesTest {
         assertEquals("website", overlaid["application"])
         assertEquals("x", overlaid["custom"])
 
-        // The public attribute map does not expose system values.
         val publicAttrs = context.getAttributes()
         assertFalse(publicAttrs.containsKey("application"))
         assertEquals("staging", publicAttrs["environment"])

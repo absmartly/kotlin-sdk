@@ -141,9 +141,8 @@ class LocalServerIntegrationTest {
 
     }
 
-    // §4.7: a strict environment audience matches, and the serialized publish payload gets no new
-    // application/environment/app_version attribute entries. Only the user-set attribute is published;
-    // the collector adds application and environment server-side.
+    // Without system attributes, only the user-set attribute is published; the collector adds application and
+    // environment server-side.
     @Test
     fun matchesEnvironmentAudienceWithoutPublishingSystemAttributes() {
         contextResponse = """

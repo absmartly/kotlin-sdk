@@ -783,10 +783,8 @@ class Context private constructor(
         return RuleResolution(getVariantAssigner(unitType, getUnitHash(unitType, uid)).assign(split, data.seedHi, data.seedLo), false)
     }
 
-    // Re-resolves the rules only once an attribute was set since the assignment was built, and keeps the cached
-    // assignment when the outcome is unchanged, so setting an unrelated attribute never exposes it a second time.
-    // An exposed split resolved without its unit keeps resolving that way, so a unit set afterwards cannot switch
-    // the variant the user already saw.
+    // Re-resolves the rules only after an attribute changed, and keeps the cached assignment while the outcome is the
+    // same so it is not exposed twice. An exposed split resolved without its unit stays pinned to that variant.
     private fun ruleMatches(experiment: ContextExperiment, assignment: Assignment): Boolean {
         if (experiment.rules == null || attrsSeq_.get() <= assignment.attrsSeq) return true
         val rule = resolveRule(experiment, unitPinnedMissing = assignment.ruleMissingUnit && assignment.exposed.get())
@@ -995,10 +993,7 @@ class Context private constructor(
         return result
     }
 
-    // Variables available to audience filters and assignment-rule conditions. The configured application and
-    // environment names (which the collector also attaches to every exposure server-side) are always available
-    // and are put first, so a user attribute of the same name overrides them, including one set after an
-    // assignment was cached (the attrsSeq_ bump invalidates it). Null or empty names are left out.
+    // Variables for audiences and rule conditions. System values go first, so a user attribute of the same name wins.
     internal fun buildEvaluationAttributesMap(): Map<String, Any?> {
         val result = mutableMapOf<String, Any?>()
         putIfNotEmpty(result, "application", applicationName)
