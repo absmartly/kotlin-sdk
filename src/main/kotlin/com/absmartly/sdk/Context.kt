@@ -24,7 +24,9 @@ class Context private constructor(
     // Non-empty application and environment names from the client config, which the collector also attaches
     // to every exposure server-side, so audiences and rule conditions can target them. Null/empty means unset.
     private val applicationName: String?,
-    private val environmentName: String?
+    private val environmentName: String?,
+    private val applicationVersion: String? = null,
+    private val includeSystemAttributes: Boolean = false
 ) : Closeable {
 
     constructor(
@@ -44,7 +46,8 @@ class Context private constructor(
         refreshInterval = options.refreshPeriod,
         scheduler = null,
         applicationName = application,
-        environmentName = environment
+        environmentName = environment,
+        applicationVersion = null
     ) {
         if (startReady) {
             setData(data)
@@ -66,7 +69,8 @@ class Context private constructor(
             eventLogger: ContextEventLogger?,
             scheduler: ScheduledExecutorService?,
             application: String? = null,
-            environment: String? = null
+            environment: String? = null,
+            applicationVersion: String? = null
         ): Context {
             val units = mutableMapOf<String, Any>()
 
@@ -81,7 +85,9 @@ class Context private constructor(
                 refreshInterval = config.refreshInterval,
                 scheduler = scheduler,
                 applicationName = application,
-                environmentName = environment
+                environmentName = environment,
+                applicationVersion = applicationVersion,
+                includeSystemAttributes = config.includeSystemAttributes
             )
 
             config.getUnits()?.let { context.setUnits(it) }
@@ -183,6 +189,8 @@ class Context private constructor(
         var fullOn: Boolean = false
         var custom: Boolean = false
         var audienceMismatch: Boolean = false
+        var ruleOverride: Boolean = false
+        var assignmentRules: String? = null
         var variables: Map<String, Any?>? = null
         var attrsSeq: Int = 0
         val exposed: AtomicBoolean = AtomicBoolean(false)
@@ -670,7 +678,21 @@ class Context private constructor(
             if (experiment != null) {
                 val unitType = experiment.data.unitType
 
-                if (experiment.data.audience != null && experiment.data.audience!!.isNotEmpty()) {
+                val rule = audienceMatcher.evaluateRules(experiment.data.assignmentRules, environmentName, buildEvaluationAttributesMap())
+                if (rule?.variant != null) {
+                    assignment.variant = rule.variant!!
+                    assignment.ruleOverride = true
+                    assignment.assigned = true
+                } else if (rule?.split != null && unitType != null && units[unitType] != null) {
+                    val unitHash = getUnitHash(unitType, units[unitType]!!)
+                    assignment.variant = getVariantAssigner(unitType, unitHash).assign(rule.split!!, experiment.data.seedHi, experiment.data.seedLo)
+                    assignment.ruleOverride = true
+                    assignment.assigned = true
+                }
+
+                if (assignment.ruleOverride) {
+                    // A matching rule takes precedence over audience, traffic, and custom assignment.
+                } else if (experiment.data.audience != null && experiment.data.audience!!.isNotEmpty()) {
                     val attrs = buildEvaluationAttributesMap()
                     val match = audienceMatcher.evaluate(experiment.data.audience!!, attrs)
                     if (match != null) {
@@ -725,6 +747,7 @@ class Context private constructor(
                 assignment.variantConfigs = experiment.data.variants.map { it.config }
                 assignment.audience = experiment.data.audience
                 assignment.audienceStrict = experiment.data.audienceStrict
+                assignment.assignmentRules = experiment.data.assignmentRules
                 assignment.fullOnVariant = experiment.data.fullOnVariant
                 assignment.attrsSeq = attrsSeq_.get()
             }
@@ -764,6 +787,7 @@ class Context private constructor(
                 experiment.variants.map { it.config } == assignment.variantConfigs &&
                 experiment.audience == assignment.audience &&
                 experiment.audienceStrict == assignment.audienceStrict
+                && experiment.assignmentRules == assignment.assignmentRules
     }
 
     private fun audienceMatches(experiment: Experiment, assignment: Assignment): Boolean {
@@ -798,7 +822,8 @@ class Context private constructor(
                 overridden = assignment.overridden,
                 fullOn = assignment.fullOn,
                 custom = assignment.custom,
-                audienceMismatch = assignment.audienceMismatch
+                audienceMismatch = assignment.audienceMismatch,
+                ruleOverride = assignment.ruleOverride
             )
             exposures_.add(exposure)
             pendingCount_.incrementAndGet()
@@ -855,13 +880,25 @@ class Context private constructor(
             if (attributes_.isEmpty()) null else attributes_.toList()
         }
 
+        val publishedAttributes = if (!includeSystemAttributes) attrList else {
+            val existing = attrList?.associateBy { it.name } ?: emptyMap()
+            val stamp = (exposureList.minOfOrNull { it.exposedAt } ?: goalList.minOfOrNull { it.achievedAt } ?: System.currentTimeMillis())
+            buildList {
+                fun add(name: String, value: Any?) { if (value != null && !existing.containsKey(name)) add(Attribute(name, value, stamp)) }
+                add("sdk_name", SdkVersion.NAME); add("sdk_version", SdkVersion.VERSION)
+                add("application", applicationName); add("environment", environmentName)
+                if (!applicationVersion.isNullOrEmpty() && applicationVersion != "0") add("app_version", applicationVersion)
+                addAll(attrList ?: emptyList())
+            }
+        }
+
         val event = PublishEvent(
             hashed = true,
             publishedAt = System.currentTimeMillis(),
             units = unitList,
             exposures = exposureList.ifEmpty { null },
             goals = goalList.ifEmpty { null },
-            attributes = attrList
+            attributes = publishedAttributes
         )
 
         // Like the JavaScript SDK, the publish event is logged once the batch is delivered.

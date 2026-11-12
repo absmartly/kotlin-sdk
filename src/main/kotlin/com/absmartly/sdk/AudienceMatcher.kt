@@ -23,7 +23,7 @@ internal class AudienceMatcher {
                 val envs = rule["environments"]
                 if (envs != null && (envs !is List<*> || (envs.isNotEmpty() && !envs.contains(environment)))) continue
                 val conditions = rule["conditions"]
-                if (conditions == null || (conditions is Map<*, *> && evaluateBooleanExpr(conditions, attributes))) return action
+                if (conditions == null || (conditions is Map<*, *> && JsonExpr.evaluateBooleanExpr(conditions, attributes))) return action
             }
             null
         } catch (_: Exception) { null }
