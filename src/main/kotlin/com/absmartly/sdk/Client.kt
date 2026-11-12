@@ -35,6 +35,9 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
     // The configured application and environment names, made available to audiences and rule conditions.
     val application: String
     val environment: String
+    val applicationVersion: String
+    val agentVersion: String get() = SdkVersion.VERSION
+    val agent: String get() = SdkVersion.AGENT
 
     init {
         val endpoint = config.endpoint
@@ -61,6 +64,7 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
 
         this.application = application
         this.environment = environment
+        this.applicationVersion = config.applicationVersion ?: "0"
 
         url = "$endpoint/context"
         executor = config.executor
@@ -71,8 +75,8 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
             "X-API-Key" to apiKey,
             "X-Application" to application,
             "X-Environment" to environment,
-            "X-Application-Version" to "0",
-            "X-Agent" to "absmartly-kotlin-sdk"
+            "X-Application-Version" to applicationVersion.toLongOrNull()?.toString().orEmpty().ifEmpty { "0" },
+            "X-Agent" to SdkVersion.AGENT
         )
 
         query = mapOf(

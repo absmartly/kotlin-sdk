@@ -28,7 +28,8 @@ class Experiment(
     @JsonProperty("variants") var variants: List<ExperimentVariant> = emptyList(),
     @JsonProperty("audienceStrict") var audienceStrict: Boolean = false,
     @JsonProperty("audience") var audience: String? = null,
-    @JsonProperty("customFieldValues") var customFieldValues: List<CustomFieldValue>? = null
+    @JsonProperty("customFieldValues") var customFieldValues: List<CustomFieldValue>? = null,
+    @JsonProperty("assignmentRules") var assignmentRules: String? = null
 )
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -65,7 +66,8 @@ class Exposure(
     var overridden: Boolean = false,
     var fullOn: Boolean = false,
     var custom: Boolean = false,
-    var audienceMismatch: Boolean = false
+    var audienceMismatch: Boolean = false,
+    var ruleOverride: Boolean = false
 )
 
 @JsonInclude(JsonInclude.Include.NON_NULL)

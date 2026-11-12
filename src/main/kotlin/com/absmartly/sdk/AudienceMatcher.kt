@@ -5,7 +5,36 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 internal class AudienceMatcher {
     private val objectMapper = jacksonObjectMapper()
 
+    data class RuleAction(val variant: Int?, val split: DoubleArray?)
     data class Result(val value: Boolean)
+
+    fun evaluateRules(rulesJson: String?, environment: String?, attributes: Map<String, Any?>): RuleAction? {
+        if (rulesJson.isNullOrEmpty()) return null
+        return try {
+            val root = objectMapper.readValue(rulesJson, Map::class.java)
+            val rules = root["rules"] as? List<*> ?: return null
+            for (entry in rules) {
+                val rule = entry as? Map<*, *> ?: continue
+                val action = when (rule["type"]) {
+                    "assign" -> (rule["variant"] as? Number)?.toDouble()?.takeIf { it.isFinite() && it == kotlin.math.floor(it) }?.let { RuleAction(it.toInt(), null) }
+                    "split" -> parseSplit(rule["percentages"] as? String)
+                    else -> null
+                } ?: continue
+                val envs = rule["environments"]
+                if (envs != null && (envs !is List<*> || (envs.isNotEmpty() && !envs.contains(environment)))) continue
+                val conditions = rule["conditions"]
+                if (conditions == null || (conditions is Map<*, *> && evaluateBooleanExpr(conditions, attributes))) return action
+            }
+            null
+        } catch (_: Exception) { null }
+    }
+
+    private fun parseSplit(value: String?): RuleAction? {
+        if (value == null) return null
+        val nums = value.split('/').map { it.trim().toDoubleOrNull() ?: return null }
+        if (nums.isEmpty() || nums.any { it < 0.0 } || kotlin.math.abs(nums.sum() - 100.0) > 0.01) return null
+        return RuleAction(null, nums.map { it / 100.0 }.toDoubleArray())
+    }
 
     fun evaluate(audience: String, attributes: Map<String, Any?>): Result? {
         return try {
@@ -105,6 +134,11 @@ internal object JsonExpr {
             "gte" -> binaryOp(args, vars) { a, b -> compare(a, b)?.let { it >= 0 } }
             "lt" -> binaryOp(args, vars) { a, b -> compare(a, b)?.let { it < 0 } }
             "lte" -> binaryOp(args, vars) { a, b -> compare(a, b)?.let { it <= 0 } }
+            "semver_eq" -> semverOp(args, vars) { it == 0 }
+            "semver_gt" -> semverOp(args, vars) { it > 0 }
+            "semver_gte" -> semverOp(args, vars) { it >= 0 }
+            "semver_lt" -> semverOp(args, vars) { it < 0 }
+            "semver_lte" -> semverOp(args, vars) { it <= 0 }
             "in" -> binaryOp(args, vars) { haystack, needle ->
                 when (haystack) {
                     is List<*> -> haystack.any { compare(it, needle) == 0 }
@@ -126,6 +160,14 @@ internal object JsonExpr {
             }
             else -> null
         }
+    }
+
+    private fun semverOp(args: Any?, vars: Map<String, Any?>, op: (Int) -> Boolean): Any? {
+        if (args !is List<*>) return null
+        val left = evaluate(args.getOrNull(0), vars)
+        val right = evaluate(args.getOrNull(1), vars)
+        val result = SemverComparator.compare(left, right) ?: return null
+        return op(result)
     }
 
     private fun binaryOp(args: Any?, vars: Map<String, Any?>, op: (Any, Any) -> Any?): Any? {
