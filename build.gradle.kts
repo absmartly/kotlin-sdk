@@ -6,6 +6,16 @@ plugins {
 }
 
 publishing {
+    repositories {
+        maven {
+            name = "Central"
+            url = uri("https://central.sonatype.com/api/v1/publisher/upload")
+            credentials {
+                username = providers.environmentVariable("MAVEN_CENTRAL_USERNAME").orNull
+                password = providers.environmentVariable("MAVEN_CENTRAL_PASSWORD").orNull
+            }
+        }
+    }
     publications {
         create<MavenPublication>("maven") {
             from(components["java"])

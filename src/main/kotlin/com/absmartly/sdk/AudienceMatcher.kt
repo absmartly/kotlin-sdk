@@ -32,7 +32,7 @@ internal class AudienceMatcher {
     private fun parseSplit(value: String?): RuleAction? {
         if (value == null) return null
         val nums = value.split('/').map { it.trim().toDoubleOrNull() ?: return null }
-        if (nums.isEmpty() || nums.any { it < 0.0 } || kotlin.math.abs(nums.sum() - 100.0) > 0.01) return null
+        if (nums.isEmpty() || nums.any { !it.isFinite() || it < 0.0 } || !nums.sum().isFinite() || kotlin.math.abs(nums.sum() - 100.0) > 0.01) return null
         return RuleAction(null, nums.map { it / 100.0 }.toDoubleArray())
     }
 

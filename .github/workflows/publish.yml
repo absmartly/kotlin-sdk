@@ -24,4 +24,4 @@ jobs:
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           SIGNING_KEY: ${{ secrets.GPG_KEY }}
           SIGNING_PASSWORD: ${{ secrets.GPG_PASSWORD }}
-        run: ./gradlew clean build publish -x test
+        run: ./gradlew clean build publish -PversionName="${GITHUB_REF_NAME#v}" -PsigningInMemoryKey="$SIGNING_KEY" -PsigningInMemoryKeyPassword="$SIGNING_PASSWORD" -x test
