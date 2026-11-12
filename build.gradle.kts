@@ -30,8 +30,8 @@ group = "com.absmartly"
 version = providers.gradleProperty("versionName").orElse("1.0.0").get()
 
 signing {
-    val signingKey: String? = providers.gradleProperty("signingInMemoryKey").orNull
-    val signingPassword: String? = providers.gradleProperty("signingInMemoryKeyPassword").orNull
+    val signingKey: String? = providers.environmentVariable("SIGNING_KEY").orNull
+    val signingPassword: String? = providers.environmentVariable("SIGNING_PASSWORD").orNull
     if (!signingKey.isNullOrBlank()) {
         useInMemoryPgpKeys(signingKey, signingPassword)
         sign(publishing.publications["maven"])

@@ -653,7 +653,8 @@ class Context private constructor(
                     return cached
                 }
             } else if (custom == null || custom == cached.variant) {
-                if (experimentMatches(experiment.data, cached) && audienceMatches(experiment.data, cached)) {
+                if (experimentMatches(experiment.data, cached) && audienceMatches(experiment.data, cached) &&
+                    (experiment.data.assignmentRules.isNullOrEmpty() || attrsSeq_.get() == cached.attrsSeq)) {
                     return cached
                 }
             }
@@ -690,19 +691,15 @@ class Context private constructor(
                     assignment.assigned = true
                 }
 
-                if (assignment.ruleOverride) {
-                    // A matching rule takes precedence over audience, traffic, and custom assignment.
-                } else if (experiment.data.audience != null && experiment.data.audience!!.isNotEmpty()) {
+                if (!assignment.ruleOverride && experiment.data.audience != null && experiment.data.audience!!.isNotEmpty()) {
                     val attrs = buildEvaluationAttributesMap()
                     val match = audienceMatcher.evaluate(experiment.data.audience!!, attrs)
-                    if (match != null) {
-                        assignment.audienceMismatch = !match.value
-                    }
+                    if (match != null) assignment.audienceMismatch = !match.value
                 }
 
-                if (experiment.data.audienceStrict && assignment.audienceMismatch) {
+                if (!assignment.ruleOverride && experiment.data.audienceStrict && assignment.audienceMismatch) {
                     assignment.variant = 0
-                } else if (experiment.data.fullOnVariant == 0) {
+                } else if (!assignment.ruleOverride && experiment.data.fullOnVariant == 0) {
                     val uid = units[experiment.data.unitType]
                     if (uid != null) {
                         val unitHash = getUnitHash(unitType!!, uid)
@@ -729,7 +726,7 @@ class Context private constructor(
                         }
                         assignment.assigned = true
                     }
-                } else {
+                } else if (!assignment.ruleOverride) {
                     assignment.assigned = true
                     assignment.variant = experiment.data.fullOnVariant
                     assignment.fullOn = true
