@@ -2,6 +2,7 @@ plugins {
     kotlin("jvm") version "1.9.22"
     `java-library`
     `maven-publish`
+    signing
 }
 
 publishing {
@@ -10,13 +11,22 @@ publishing {
             from(components["java"])
             groupId = "com.absmartly"
             artifactId = "absmartly-sdk-kotlin"
-            version = "1.0.0"
+            version = providers.gradleProperty("versionName").orElse("1.0.0").get()
         }
     }
 }
 
 group = "com.absmartly"
-version = "1.0.0"
+version = providers.gradleProperty("versionName").orElse("1.0.0").get()
+
+signing {
+    val signingKey: String? = providers.gradleProperty("signingInMemoryKey").orNull
+    val signingPassword: String? = providers.gradleProperty("signingInMemoryKeyPassword").orNull
+    if (!signingKey.isNullOrBlank()) {
+        useInMemoryPgpKeys(signingKey, signingPassword)
+        sign(publishing.publications["maven"])
+    }
+}
 
 repositories {
     mavenCentral()
