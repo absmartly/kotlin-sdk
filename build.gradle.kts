@@ -47,18 +47,23 @@ version = providers.gradleProperty("versionName").orElse("1.0.0").get()
 val signingKey: String? = providers.environmentVariable("SIGNING_KEY").orNull
 val signingPassword: String? = providers.environmentVariable("SIGNING_PASSWORD").orNull
 
+// Matches the upload task itself, so a direct publishMavenPublicationToSonatypeRepository is covered as well as
+// the publishToSonatype lifecycle task that depends on it.
+fun TaskExecutionGraph.publishesToSonatype() =
+    allTasks.any { it is PublishToMavenRepository && it.repository.name == "sonatype" }
+
 signing {
     if (!signingKey.isNullOrBlank()) {
         useInMemoryPgpKeys(signingKey, signingPassword)
     }
     sign(publishing.publications["maven"])
     // Local publishToMavenLocal stays unsigned; anything bound for Central must be signed.
-    setRequired { gradle.taskGraph.allTasks.any { it.name == "publishToSonatype" } }
+    setRequired { gradle.taskGraph.publishesToSonatype() }
 }
 
 // Fail before anything is staged, rather than letting Central reject an unsigned release.
 gradle.taskGraph.whenReady {
-    if (allTasks.any { it.name == "publishToSonatype" } && (signingKey.isNullOrBlank() || signingPassword.isNullOrBlank())) {
+    if (publishesToSonatype() && (signingKey.isNullOrBlank() || signingPassword.isNullOrBlank())) {
         throw GradleException("SIGNING_KEY and SIGNING_PASSWORD must be set to publish to Maven Central")
     }
 }
