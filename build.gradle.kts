@@ -3,19 +3,27 @@ plugins {
     `java-library`
     `maven-publish`
     signing
+    id("io.github.gradle-nexus.publish-plugin") version "2.0.0"
+}
+
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
+
+// Same staging API as the java-sdk: the Central Portal's OSSRH-compatible endpoint.
+nexusPublishing {
+    repositories {
+        sonatype {
+            nexusUrl.set(uri("https://ossrh-staging-api.central.sonatype.com/service/local/"))
+            snapshotRepositoryUrl.set(uri("https://central.sonatype.com/repository/maven-snapshots/"))
+            username.set(providers.environmentVariable("MAVEN_CENTRAL_USERNAME"))
+            password.set(providers.environmentVariable("MAVEN_CENTRAL_PASSWORD"))
+        }
+    }
 }
 
 publishing {
-    repositories {
-        maven {
-            name = "Central"
-            url = uri("https://central.sonatype.com/api/v1/publisher/upload")
-            credentials {
-                username = providers.environmentVariable("MAVEN_CENTRAL_USERNAME").orNull
-                password = providers.environmentVariable("MAVEN_CENTRAL_PASSWORD").orNull
-            }
-        }
-    }
     publications {
         create<MavenPublication>("maven") {
             from(components["java"])
@@ -25,7 +33,7 @@ publishing {
                 name.set("ABsmartly Kotlin SDK")
                 description.set("ABsmartly SDK for Kotlin")
                 url.set("https://github.com/absmartly/kotlin-sdk")
-                licenses { license { name.set("MIT License"); url.set("https://opensource.org/licenses/MIT") } }
+                licenses { license { name.set("The Apache License, Version 2.0"); url.set("http://www.apache.org/licenses/LICENSE-2.0.txt") } }
                 developers { developer { id.set("absmartly"); name.set("ABsmartly"); url.set("https://www.absmartly.com") } }
                 scm { url.set("https://github.com/absmartly/kotlin-sdk"); connection.set("scm:git:https://github.com/absmartly/kotlin-sdk.git"); developerConnection.set("scm:git:ssh://git@github.com/absmartly/kotlin-sdk.git") }
             }
