@@ -8,6 +8,8 @@ import java.util.concurrent.ForkJoinPool
 class Client private constructor(config: ClientConfig, private val httpClient: HTTPClient) : Closeable {
 
     companion object {
+        internal fun applicationVersionHeader(version: String): String =
+            if (version.isNotEmpty() && version.length <= 18 && version.all { it in '0'..'9' }) version else "0"
         @JvmStatic
         fun create(config: ClientConfig): Client {
             val httpClient = DefaultHTTPClient.create()
@@ -32,6 +34,13 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
     private var deserializer: ContextDataDeserializer
     private var serializer: ContextEventSerializer
 
+    // The configured application and environment names, made available to audiences and rule conditions.
+    val application: String
+    val environment: String
+    val applicationVersion: String
+    val agentVersion: String get() = SdkVersion.VERSION
+    val agent: String get() = SdkVersion.AGENT
+
     init {
         val endpoint = config.endpoint
         require(!endpoint.isNullOrEmpty()) { "Missing Endpoint configuration" }
@@ -55,6 +64,10 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
         val environment = config.environment
         require(!environment.isNullOrEmpty()) { "Missing Environment configuration" }
 
+        this.application = application
+        this.environment = environment
+        this.applicationVersion = config.applicationVersion ?: "0"
+
         url = "$endpoint/context"
         executor = config.executor
         deserializer = config.deserializer ?: DefaultContextDataDeserializer()
@@ -64,8 +77,10 @@ class Client private constructor(config: ClientConfig, private val httpClient: H
             "X-API-Key" to apiKey,
             "X-Application" to application,
             "X-Environment" to environment,
-            "X-Application-Version" to "0",
-            "X-Agent" to "absmartly-kotlin-sdk"
+            // The collector parses this header as a whole number and rejects anything else, so a version such as
+            // "2.4.1" is sent as "0"; the full version is still used for the app_version system attribute.
+            "X-Application-Version" to applicationVersionHeader(applicationVersion),
+            "X-Agent" to SdkVersion.AGENT
         )
 
         query = mapOf(

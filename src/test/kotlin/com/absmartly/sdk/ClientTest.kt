@@ -126,4 +126,45 @@ class ClientTest {
         client.close()
         assertTrue(closeCalled)
     }
+
+    @Test
+    fun sendsVersionedAgentOnFetchAndPublish() {
+        val mockHttp = MockHTTPClient()
+        val client = Client.create(createConfig(), mockHttp)
+        client.getContextData().join()
+        client.publish(PublishEvent(hashed = true, units = emptyList())).join()
+        assertEquals("absmartly-kotlin-sdk/${SdkVersion.VERSION}", mockHttp.lastGetHeaders.get()!!["X-Agent"])
+        assertEquals("absmartly-kotlin-sdk/${SdkVersion.VERSION}", mockHttp.lastPutHeaders.get()!!["X-Agent"])
+        assertEquals(SdkVersion.AGENT, client.agent)
+    }
+
+    @Test
+    fun sdkVersionIsTheBuildVersion() {
+        assertEquals(System.getProperty("absmartly.expectedSdkVersion"), SdkVersion.VERSION)
+        assertEquals("absmartly-kotlin-sdk/${SdkVersion.VERSION}", SdkVersion.AGENT)
+    }
+
+    @Test
+    fun applicationVersionHeaderIsAWholeNumberOrZero() {
+        fun header(version: String?): String? {
+            val mockHttp = MockHTTPClient()
+            val config = createConfig()
+            version?.let { config.setApplicationVersion(it) }
+            Client.create(config, mockHttp).getContextData().join()
+            return mockHttp.lastGetHeaders.get()!!["X-Application-Version"]
+        }
+        assertEquals("0", header(null))
+        assertEquals("42", header("42"))
+        assertEquals("0", header("2.4.1"))
+        assertEquals("0", header("-5"))
+        assertEquals("0", header("+5"))
+        assertEquals("0", header("1234567890123456789"))
+    }
+
+    @Test
+    fun applicationVersionGetterKeepsTheFullVersion() {
+        val client = Client.create(createConfig().setApplicationVersion("2.4.1"), MockHTTPClient())
+        assertEquals("2.4.1", client.applicationVersion)
+        assertEquals("0", Client.create(createConfig(), MockHTTPClient()).applicationVersion)
+    }
 }

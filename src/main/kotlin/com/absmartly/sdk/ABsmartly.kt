@@ -79,24 +79,32 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
     }
 
     fun createContext(config: ContextConfig): Context {
+        val client = client_.get()
         return Context.create(
             config = config,
             dataFuture = contextDataProvider.getContextData(),
             dataProvider = contextDataProvider,
             eventHandler = contextPublisher,
             eventLogger = contextEventLogger,
-            scheduler = scheduler
+            scheduler = scheduler,
+            application = client?.application,
+            environment = client?.environment,
+            applicationVersion = client?.applicationVersion
         )
     }
 
     fun createContextWith(config: ContextConfig, data: ContextData): Context {
+        val client = client_.get()
         return Context.create(
             config = config,
             dataFuture = CompletableFuture.completedFuture(data),
             dataProvider = contextDataProvider,
             eventHandler = contextPublisher,
             eventLogger = contextEventLogger,
-            scheduler = scheduler
+            scheduler = scheduler,
+            application = client?.application,
+            environment = client?.environment,
+            applicationVersion = client?.applicationVersion
         )
     }
 
