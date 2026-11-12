@@ -338,6 +338,40 @@ the configured value, including one set after an assignment was cached. These va
 local evaluation map; the collector already attaches them to every exposure server-side, so nothing extra
 is published.
 
+### System Attributes
+
+`ContextConfig.setIncludeSystemAttributes(true)` also makes `app_version` (from `ClientConfig.setApplicationVersion`)
+available to audiences and rule conditions, and prepends `sdk_name`, `sdk_version`, `application`, `environment` and
+`app_version` to the attributes of every publish. It is off by default. `app_version` is left out when no version is
+set or it is `"0"`, and a system attribute is not published when you set an attribute of the same name.
+
+```kotlin
+val clientConfig = ClientConfig.create()
+    // ...endpoint, API key, application, environment
+    .setApplicationVersion("2.4.1")
+
+val contextConfig = ContextConfig.create()
+    .setUnit("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
+    .setIncludeSystemAttributes(true)
+```
+
+The `X-Application-Version` header carries the version only when it is a whole number; otherwise it is `"0"`. The
+`X-Agent` header is `absmartly-kotlin-sdk/<version>` and is sent on both fetch and publish.
+
+### Assignment Rules
+
+An experiment can carry assignment rules, configured in the web console. The first matching rule assigns the unit,
+ahead of the audience, traffic allocation and custom assignments (an override still wins). An `assign` rule sets a
+fixed variant; a `split` rule randomises the unit over its own percentages with the experiment's seed. Rule-assigned
+exposures are flagged `ruleOverride` so they are excluded from analysis.
+
+Rule conditions are evaluated against the same attributes as audiences and support the `semver_eq`, `semver_gt`,
+`semver_gte`, `semver_lt` and `semver_lte` operators, so rules (and audiences) can target app versions:
+
+```kotlin
+context.setAttribute("app_version", "2.4.1")
+```
+
 ### Custom Assignments
 
 ```kotlin
