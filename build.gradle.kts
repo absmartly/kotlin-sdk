@@ -44,14 +44,50 @@ publishing {
 group = "com.absmartly"
 version = providers.gradleProperty("versionName").orElse("1.0.0").get()
 
+val signingKey: String? = providers.environmentVariable("SIGNING_KEY").orNull
+val signingPassword: String? = providers.environmentVariable("SIGNING_PASSWORD").orNull
+
 signing {
-    val signingKey: String? = providers.environmentVariable("SIGNING_KEY").orNull
-    val signingPassword: String? = providers.environmentVariable("SIGNING_PASSWORD").orNull
     if (!signingKey.isNullOrBlank()) {
         useInMemoryPgpKeys(signingKey, signingPassword)
-        sign(publishing.publications["maven"])
+    }
+    sign(publishing.publications["maven"])
+    // Local publishToMavenLocal stays unsigned; anything bound for Central must be signed.
+    setRequired { gradle.taskGraph.allTasks.any { it.name == "publishToSonatype" } }
+}
+
+// Fail before anything is staged, rather than letting Central reject an unsigned release.
+gradle.taskGraph.whenReady {
+    if (allTasks.any { it.name == "publishToSonatype" } && (signingKey.isNullOrBlank() || signingPassword.isNullOrBlank())) {
+        throw GradleException("SIGNING_KEY and SIGNING_PASSWORD must be set to publish to Maven Central")
     }
 }
+
+// SdkVersion is generated from the build version, so X-Agent and sdk_version always match the published artifact.
+val generateSdkVersion by tasks.registering {
+    val outputDir = layout.buildDirectory.dir("generated/sdkversion")
+    val sdkVersion = project.version.toString()
+    inputs.property("version", sdkVersion)
+    outputs.dir(outputDir)
+    doLast {
+        val file = outputDir.get().file("com/absmartly/sdk/SdkVersion.kt").asFile
+        file.parentFile.mkdirs()
+        file.writeText(
+            """
+            |package com.absmartly.sdk
+            |
+            |/** SDK identity sent in the X-Agent header and optional system attributes. */
+            |object SdkVersion {
+            |    const val NAME = "absmartly-kotlin-sdk"
+            |    const val VERSION = "$sdkVersion"
+            |    const val AGENT = "${'$'}NAME/${'$'}VERSION"
+            |}
+            |""".trimMargin()
+        )
+    }
+}
+
+kotlin.sourceSets.named("main") { kotlin.srcDir(generateSdkVersion) }
 
 repositories {
     mavenCentral()
@@ -67,6 +103,7 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    systemProperty("absmartly.expectedSdkVersion", project.version.toString())
     testLogging {
         showStandardStreams = false
         events("passed", "failed", "skipped")

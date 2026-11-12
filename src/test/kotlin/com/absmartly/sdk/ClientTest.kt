@@ -139,6 +139,12 @@ class ClientTest {
     }
 
     @Test
+    fun sdkVersionIsTheBuildVersion() {
+        assertEquals(System.getProperty("absmartly.expectedSdkVersion"), SdkVersion.VERSION)
+        assertEquals("absmartly-kotlin-sdk/${SdkVersion.VERSION}", SdkVersion.AGENT)
+    }
+
+    @Test
     fun applicationVersionHeaderIsAWholeNumberOrZero() {
         fun header(version: String?): String? {
             val mockHttp = MockHTTPClient()
