@@ -200,9 +200,9 @@ class Context private constructor(
         var ruleOverride: Boolean = false
         var ruleMissingUnit: Boolean = false
         // The rules the assignment was last validated against; a change triggers revalidation, not a rebuild.
-        var assignmentRules: String? = null
+        @Volatile var assignmentRules: String? = null
         var variables: Map<String, Any?>? = null
-        var attrsSeq: Int = 0
+        @Volatile var attrsSeq: Int = 0
         val exposed: AtomicBoolean = AtomicBoolean(false)
     }
 
@@ -799,6 +799,8 @@ class Context private constructor(
     // pinned to that variant.
     private fun attributesMatch(experiment: ContextExperiment, assignment: Assignment): Boolean {
         val data = experiment.data
+        // Lock-free for the common case: nothing changed since the last validation.
+        if (data.assignmentRules == assignment.assignmentRules && attrsSeq_.get() <= assignment.attrsSeq) return true
         synchronized(assignment) {
             val rulesChanged = data.assignmentRules != assignment.assignmentRules
             val attrsSeq = attrsSeq_.get()

@@ -109,6 +109,21 @@ class AssignmentRulesTest {
         assertNull(matcher.evaluateRules("""{"rules":"nope"}""", "production", emptyMap()))
     }
 
+    // A map attribute whose lookup throws, so its rule's condition fails to evaluate.
+    private class ThrowingMap : AbstractMap<String, Any?>() {
+        override val entries: Set<Map.Entry<String, Any?>> get() = emptySet()
+        override fun get(key: String): Any? = throw IllegalStateException("boom")
+    }
+
+    @Test
+    fun conditionThatThrowsSkipsOnlyItsRule() {
+        val json = rules(
+            """{"type":"assign","variant":1,"conditions":{"eq":[{"var":"bad/x"},{"value":1}]}}""",
+            """{"type":"assign","variant":2}"""
+        )
+        assertEquals(2, matcher.evaluateRules(json, "production", mapOf("bad" to ThrowingMap()))?.variant)
+    }
+
     @Test
     fun splitPercentagesFollowTheBackendCheck() {
         fun split(p: String) = matcher.evaluateRules(rules("""{"type":"split","percentages":"$p"}"""), null, emptyMap())?.split
@@ -394,6 +409,31 @@ class AssignmentRulesTest {
         assertNull(data.experiments[0].assignmentRules)
         assertNull(data.experiments[1].assignmentRules)
         assertEquals("""{"rules":[]}""", data.experiments[2].assignmentRules)
+    }
+
+    // Unknown scalar, object and array keys at every payload level, an unknown rule type and operator, and every
+    // non-rule assignmentRules shape are ignored: the context loads and both experiments still assign.
+    @Test
+    fun unknownPayloadFieldsAreIgnoredAtEveryLevel() {
+        val unknown = """"futureScalar":1,"futureObject":{"a":[1,{"b":2}]},"futureArray":[{"c":null}]"""
+        fun experimentJson(id: Int, name: String, rules: String) = """{"id":$id,"name":"$name","unitType":"session_id",
+            "iteration":1,"seedHi":3603515,"seedLo":233373850,"split":[0.5,0.5],"trafficSeedHi":449867249,
+            "trafficSeedLo":455443629,"trafficSplit":[0.0,1.0],"fullOnVariant":0,"assignmentRules":$rules,
+            "applications":[{"name":"website",$unknown}],
+            "variants":[{"name":"A","config":null,$unknown},{"name":"B","config":null,$unknown}],
+            "customFieldValues":[{"name":"f","type":"string","value":"v",$unknown}],
+            "holdouts":[{"id":9,$unknown}],"switchback":{$unknown},$unknown}"""
+        val ruleJson = """{"rules":[{"type":"future","variant":0},{"type":"assign","variant":1,"conditions":{"future_op":[1]},$unknown},{"type":"assign","variant":1,$unknown}],$unknown}"""
+        val quoted = "\"" + ruleJson.replace("\"", "\\\"") + "\""
+        val normal = context(experiment(null)).peekTreatment("exp_rules")
+        for (other in listOf("null", "\"\"", "\"{}\"", "\"not json\"", "{}", "[]", "7", "true")) {
+            val json = """{"experiments":[${experimentJson(1, "exp_rules", quoted)},${experimentJson(2, "exp_other", other)}],$unknown}"""
+            val data = DefaultContextDataDeserializer().deserialize(json.toByteArray(), 0, json.length)!!
+            val ctx = context(*data.experiments.toTypedArray())
+            assertEquals(1, ctx.peekTreatment("exp_rules"), other)
+            assertEquals(normal, ctx.peekTreatment("exp_other"), other)
+            assertEquals("v", ctx.getCustomFieldValue("exp_rules", "f"))
+        }
     }
 
     @Test

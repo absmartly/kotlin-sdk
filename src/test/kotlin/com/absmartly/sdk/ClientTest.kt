@@ -146,12 +146,17 @@ class ClientTest {
 
     @Test
     fun applicationVersionHeaderIsAWholeNumberOrZero() {
+        // Checked on both GET and PUT; the collector reads the header as a Long on both.
         fun header(version: String?): String? {
             val mockHttp = MockHTTPClient()
             val config = createConfig()
             version?.let { config.setApplicationVersion(it) }
-            Client.create(config, mockHttp).getContextData().join()
-            return mockHttp.lastGetHeaders.get()!!["X-Application-Version"]
+            val client = Client.create(config, mockHttp)
+            client.getContextData().join()
+            client.publish(PublishEvent()).join()
+            val get = mockHttp.lastGetHeaders.get()!!["X-Application-Version"]
+            assertEquals(get, mockHttp.lastPutHeaders.get()!!["X-Application-Version"])
+            return get
         }
         assertEquals("0", header(null))
         assertEquals("42", header("42"))
@@ -159,6 +164,9 @@ class ClientTest {
         assertEquals("1004", header(" 1004 "))
         assertEquals("0", header(" "))
         assertEquals("0", header("1 004"))
+        assertEquals("0", header(""))
+        assertEquals("0", header("\u0661\u0662"))
+        assertEquals("123456789012345678", header("123456789012345678"))
         assertEquals("0", header("2.4.1"))
         assertEquals("0", header("-5"))
         assertEquals("0", header("+5"))
