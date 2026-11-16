@@ -20,7 +20,12 @@ class Context private constructor(
     private val dataProvider: ContextDataProvider?,
     private val publishDelay: Long,
     private val refreshInterval: Long,
-    private val scheduler: ScheduledExecutorService?
+    private val scheduler: ScheduledExecutorService?,
+    // Non-empty application and environment names from the client config, which the collector also attaches
+    // to every exposure server-side, so audiences and rule conditions can target them. Null/empty means unset.
+    private val applicationName: String?,
+    private val environmentName: String?,
+    private val includeSystemAttributes: Boolean = false
 ) : Closeable {
 
     constructor(
@@ -29,6 +34,18 @@ class Context private constructor(
         options: ContextOptions,
         eventLogger: ContextEventLogger? = null,
         startReady: Boolean = true
+    ) : this(data, units, options, eventLogger, startReady, application = null, environment = null)
+
+    // A separate overload, so the constructor above keeps its JVM signature; application and environment have no
+    // defaults here so that calls without them still resolve to it.
+    constructor(
+        data: ContextData,
+        units: Map<String, Any>,
+        options: ContextOptions,
+        eventLogger: ContextEventLogger? = null,
+        startReady: Boolean = true,
+        application: String?,
+        environment: String?
     ) : this(
         units = HashMap(units),
         eventLogger = eventLogger,
@@ -36,7 +53,9 @@ class Context private constructor(
         dataProvider = null,
         publishDelay = options.publishDelay,
         refreshInterval = options.refreshPeriod,
-        scheduler = null
+        scheduler = null,
+        applicationName = application,
+        environmentName = environment
     ) {
         if (startReady) {
             setData(data)
@@ -56,7 +75,9 @@ class Context private constructor(
             dataProvider: ContextDataProvider?,
             eventHandler: ContextPublisher?,
             eventLogger: ContextEventLogger?,
-            scheduler: ScheduledExecutorService?
+            scheduler: ScheduledExecutorService?,
+            application: String? = null,
+            environment: String? = null
         ): Context {
             val units = mutableMapOf<String, Any>()
 
@@ -69,7 +90,10 @@ class Context private constructor(
                 dataProvider = dataProvider,
                 publishDelay = config.publishDelay,
                 refreshInterval = config.refreshInterval,
-                scheduler = scheduler
+                scheduler = scheduler,
+                applicationName = application,
+                environmentName = environment,
+                includeSystemAttributes = config.includeSystemAttributes
             )
 
             config.getUnits()?.let { context.setUnits(it) }
@@ -145,6 +169,7 @@ class Context private constructor(
     private var appliedRefreshSeq_ = 0L
 
     private val attrsSeq_ = AtomicInteger(0)
+    @Volatile private var evaluationAttrs_: Pair<Int, Map<String, Any?>>? = null
     private val pendingCount_ = AtomicInteger(0)
 
     private val readyFuture_ = AtomicReference<CompletableFuture<Void>?>(null)
@@ -171,14 +196,19 @@ class Context private constructor(
         var fullOn: Boolean = false
         var custom: Boolean = false
         var audienceMismatch: Boolean = false
+        var ruleOverride: Boolean = false
+        var ruleMissingUnit: Boolean = false
+        @Volatile var assignmentRules: String? = null
         var variables: Map<String, Any?>? = null
-        var attrsSeq: Int = 0
+        @Volatile var attrsSeq: Int = 0
         val exposed: AtomicBoolean = AtomicBoolean(false)
     }
 
     private class ContextExperiment(
         val data: Experiment,
-        val variables: List<Map<String, Any?>>
+        val variables: List<Map<String, Any?>>,
+        // data.assignmentRules parsed once per data install; null when there are none or they are invalid.
+        val rules: List<*>?
     )
 
     val isReady: Boolean get() = ready_
@@ -332,6 +362,9 @@ class Context private constructor(
             return
         }
         units[unitType] = value
+        // A split rule resolved without its unit gave the full-on variant; re-randomize it now, but only while
+        // that variant is still unseen.
+        assignmentCache.values.removeIf { it.ruleMissingUnit && it.unitType == unitType && !it.exposed.get() }
     }
 
     // Exact numeric comparison, so distinct large Long ids that share a Double never compare equal.
@@ -561,6 +594,7 @@ class Context private constructor(
         val newVarIndex = mutableMapOf<String, MutableList<ContextExperiment>>()
 
         for (experiment in data.experiments) {
+            val rules = audienceMatcher.parseRules(experiment.assignmentRules)
             val variantVariables = mutableListOf<Map<String, Any?>>()
             for (variant in experiment.variants) {
                 if (variant.config != null && variant.config!!.isNotEmpty()) {
@@ -569,7 +603,7 @@ class Context private constructor(
                         val vars = objectMapper.readValue(variant.config, Map::class.java) as Map<String, Any?>
                         variantVariables.add(vars)
 
-                        val indexed = ContextExperiment(experiment, variantVariables)
+                        val indexed = ContextExperiment(experiment, variantVariables, rules)
                         for (key in vars.keys) {
                             val list = newVarIndex.getOrPut(key) { mutableListOf() }
                             val existing = list.find { it.data.name == experiment.name }
@@ -585,7 +619,7 @@ class Context private constructor(
                     variantVariables.add(emptyMap())
                 }
             }
-            newIndex[experiment.name] = ContextExperiment(experiment, variantVariables)
+            newIndex[experiment.name] = ContextExperiment(experiment, variantVariables, rules)
         }
 
         index_ = newIndex
@@ -598,7 +632,7 @@ class Context private constructor(
             val assignment = entry.value
             val experiment = newIndex[entry.key]
             if (experiment == null) {
-                if (assignment.assigned && !assignment.overridden) iter.remove()
+                if ((assignment.assigned || assignment.ruleOverride) && !assignment.overridden) iter.remove()
             } else if (!experimentMatches(experiment.data, assignment)) {
                 if (assignment.overridden) {
                     continue
@@ -629,11 +663,11 @@ class Context private constructor(
                     return cached
                 }
             } else if (experiment == null) {
-                if (!cached.assigned) {
+                if (!cached.assigned && !cached.ruleOverride) {
                     return cached
                 }
-            } else if (custom == null || custom == cached.variant) {
-                if (experimentMatches(experiment.data, cached) && audienceMatches(experiment.data, cached)) {
+            } else if (custom == null || cached.ruleOverride || custom == cached.variant) {
+                if (experimentMatches(experiment.data, cached) && attributesMatch(experiment, cached)) {
                     return cached
                 }
             }
@@ -657,18 +691,27 @@ class Context private constructor(
         } else {
             if (experiment != null) {
                 val unitType = experiment.data.unitType
+                // Read before evaluating, so an attribute set meanwhile is still seen as newer than this assignment.
+                val attrsSeq = attrsSeq_.get()
 
-                if (experiment.data.audience != null && experiment.data.audience!!.isNotEmpty()) {
-                    val attrs = buildAttributesMap()
-                    val match = audienceMatcher.evaluate(experiment.data.audience!!, attrs)
-                    if (match != null) {
-                        assignment.audienceMismatch = !match.value
-                    }
+                // A matching rule is an explicit, author-specified assignment, like an override: it wins over the
+                // audience, traffic and custom assignments, is not flagged assigned, and is exposed with ruleOverride.
+                val rule = resolveRule(experiment, unitPinnedMissing = false)
+                if (rule != null) {
+                    assignment.variant = rule.variant
+                    assignment.ruleOverride = true
+                    assignment.ruleMissingUnit = rule.missingUnit
                 }
 
-                if (experiment.data.audienceStrict && assignment.audienceMismatch) {
+                if (!assignment.ruleOverride && experiment.data.audience != null && experiment.data.audience!!.isNotEmpty()) {
+                    val attrs = buildEvaluationAttributesMap()
+                    val match = audienceMatcher.evaluate(experiment.data.audience!!, attrs)
+                    if (match != null) assignment.audienceMismatch = !match.value
+                }
+
+                if (!assignment.ruleOverride && experiment.data.audienceStrict && assignment.audienceMismatch) {
                     assignment.variant = 0
-                } else if (experiment.data.fullOnVariant == 0) {
+                } else if (!assignment.ruleOverride && experiment.data.fullOnVariant == 0) {
                     val uid = units[experiment.data.unitType]
                     if (uid != null) {
                         val unitHash = getUnitHash(unitType!!, uid)
@@ -695,7 +738,7 @@ class Context private constructor(
                         }
                         assignment.assigned = true
                     }
-                } else {
+                } else if (!assignment.ruleOverride) {
                     assignment.assigned = true
                     assignment.variant = experiment.data.fullOnVariant
                     assignment.fullOn = true
@@ -713,8 +756,9 @@ class Context private constructor(
                 assignment.variantConfigs = experiment.data.variants.map { it.config }
                 assignment.audience = experiment.data.audience
                 assignment.audienceStrict = experiment.data.audienceStrict
+                assignment.assignmentRules = experiment.data.assignmentRules
                 assignment.fullOnVariant = experiment.data.fullOnVariant
-                assignment.attrsSeq = attrsSeq_.get()
+                assignment.attrsSeq = attrsSeq
             }
         }
 
@@ -728,11 +772,61 @@ class Context private constructor(
         return assignment
     }
 
+    private class RuleResolution(val variant: Int, val missingUnit: Boolean)
+
+    // Variant bounds and split length are checked against the experiment, as in the JavaScript SDK; a rule that does
+    // not fit is ignored. A split rule without its unit falls back to the experiment's full-on variant.
+    private fun resolveRule(experiment: ContextExperiment, unitPinnedMissing: Boolean): RuleResolution? {
+        val rules = experiment.rules ?: return null
+        val action = audienceMatcher.evaluateParsedRules(rules, environmentName, buildEvaluationAttributesMap())
+            ?: return null
+        val data = experiment.data
+        val variantCount = data.variants.size
+        action.variant?.let { return if (it in 0 until variantCount) RuleResolution(it, false) else null }
+        val split = action.split ?: return null
+        if (split.size != variantCount) return null
+        val unitType = data.unitType
+        val uid = if (unitPinnedMissing) null else unitType?.let { units[it] }
+        if (unitType == null || uid == null) return RuleResolution(data.fullOnVariant, true)
+        return RuleResolution(getVariantAssigner(unitType, getUnitHash(unitType, uid)).assign(split, data.seedHi, data.seedLo), false)
+    }
+
+    // Revalidates a cached assignment after an attribute or its experiment's rules changed. It stays valid, and is
+    // not exposed again, while the rule outcome and audience result are the same; then the validated rules and
+    // attribute sequence are recorded so later reads skip the work. An exposed split resolved without its unit stays
+    // pinned to that variant.
+    private fun attributesMatch(experiment: ContextExperiment, assignment: Assignment): Boolean {
+        val data = experiment.data
+        if (data.assignmentRules == assignment.assignmentRules && attrsSeq_.get() <= assignment.attrsSeq) return true
+        synchronized(assignment) {
+            val rulesChanged = data.assignmentRules != assignment.assignmentRules
+            val attrsSeq = attrsSeq_.get()
+            if (!rulesChanged && attrsSeq <= assignment.attrsSeq) return true
+
+            val rule = resolveRule(experiment, unitPinnedMissing = assignment.ruleMissingUnit && assignment.exposed.get())
+            val cachedVariant = if (assignment.ruleOverride) assignment.variant else null
+            if (rule?.variant != cachedVariant) return false
+
+            // A rule-won assignment never consulted the audience, so the audience cannot make it stale.
+            val audience = data.audience
+            if (!assignment.ruleOverride && !audience.isNullOrEmpty() && attrsSeq > assignment.attrsSeq) {
+                val match = audienceMatcher.evaluate(audience, buildEvaluationAttributesMap())
+                val newAudienceMismatch = if (match != null) !match.value else false
+                if (newAudienceMismatch != assignment.audienceMismatch) return false
+            }
+
+            if (rule != null) assignment.ruleMissingUnit = rule.missingUnit
+            assignment.assignmentRules = data.assignmentRules
+            assignment.attrsSeq = attrsSeq
+            return true
+        }
+    }
+
     private fun getVariableAssignment(key: String): Assignment? {
         val keyExperiments = indexVariables_[key] ?: return null
         for (experiment in keyExperiments) {
             val assignment = getAssignment(experiment.data.name)
-            if (assignment.assigned || assignment.overridden) {
+            if (assignment.assigned || assignment.overridden || assignment.ruleOverride) {
                 return assignment
             }
         }
@@ -754,20 +848,6 @@ class Context private constructor(
                 experiment.audienceStrict == assignment.audienceStrict
     }
 
-    private fun audienceMatches(experiment: Experiment, assignment: Assignment): Boolean {
-        if (experiment.audience != null && experiment.audience!!.isNotEmpty()) {
-            if (attrsSeq_.get() > assignment.attrsSeq) {
-                val attrs = buildAttributesMap()
-                val match = audienceMatcher.evaluate(experiment.audience!!, attrs)
-                val newAudienceMismatch = if (match != null) !match.value else false
-                if (newAudienceMismatch != assignment.audienceMismatch) {
-                    return false
-                }
-            }
-        }
-        return true
-    }
-
     private fun queueExposure(assignment: Assignment) {
         val lock = lifecycleLock_.readLock()
         var publishedExposure: Exposure? = null
@@ -787,7 +867,7 @@ class Context private constructor(
                 fullOn = assignment.fullOn,
                 custom = assignment.custom,
                 audienceMismatch = assignment.audienceMismatch
-            )
+            ).apply { ruleOverride = assignment.ruleOverride }
             exposures_.add(exposure)
             pendingCount_.incrementAndGet()
             publishedExposure = exposure
@@ -843,13 +923,34 @@ class Context private constructor(
             if (attributes_.isEmpty()) null else attributes_.toList()
         }
 
+        // sdk_name and sdk_version only; application and environment are evaluation-only, as the collector attaches
+        // them server-side. The collector only applies attributes with setAt <= an event's time, so these carry the
+        // earliest event in the batch, and are left out when the user set the same name so theirs is kept.
+        val publishedAt = System.currentTimeMillis()
+        val publishedAttributes = if (!includeSystemAttributes) attrList else {
+            val userNames = attrList?.mapTo(HashSet()) { it.name } ?: emptySet()
+            val stamp = minOf(
+                publishedAt,
+                exposureList.minOfOrNull { it.exposedAt } ?: publishedAt,
+                goalList.minOfOrNull { it.achievedAt } ?: publishedAt
+            )
+            buildList {
+                fun addSystem(name: String, value: Any?) {
+                    if (value != null && name !in userNames) add(Attribute(name, value, stamp))
+                }
+                addSystem("sdk_name", SdkVersion.NAME)
+                addSystem("sdk_version", SdkVersion.VERSION)
+                addAll(attrList ?: emptyList())
+            }
+        }
+
         val event = PublishEvent(
             hashed = true,
-            publishedAt = System.currentTimeMillis(),
+            publishedAt = publishedAt,
             units = unitList,
             exposures = exposureList.ifEmpty { null },
             goals = goalList.ifEmpty { null },
-            attributes = attrList
+            attributes = publishedAttributes
         )
 
         // Like the JavaScript SDK, the publish event is logged once the batch is delivered.
@@ -900,6 +1001,29 @@ class Context private constructor(
             }
         }
         return result
+    }
+
+    // Variables for audiences and rule conditions. System values go first, so a user attribute of the same name wins.
+    // Built once per attribute sequence; the result is shared, so it must not be modified.
+    internal fun buildEvaluationAttributesMap(): Map<String, Any?> {
+        val seq = attrsSeq_.get()
+        evaluationAttrs_?.let { if (it.first == seq) return it.second }
+        val result = mutableMapOf<String, Any?>()
+        putIfNotEmpty(result, "application", applicationName)
+        putIfNotEmpty(result, "environment", environmentName)
+        synchronized(attributes_) {
+            for (attr in attributes_) {
+                result[attr.name] = attr.value
+            }
+        }
+        evaluationAttrs_ = seq to result
+        return result
+    }
+
+    private fun putIfNotEmpty(map: MutableMap<String, Any?>, key: String, value: String?) {
+        if (!value.isNullOrEmpty()) {
+            map[key] = value
+        }
     }
 
     private fun logEvent(type: ContextEventLogger.EventType, data: Any?) {

@@ -23,6 +23,8 @@ class ClientConfig private constructor() {
         private set
     var executor: Executor? = null
         private set
+    var applicationVersion: String? = null
+        private set
 
     fun setEndpoint(endpoint: String): ClientConfig = apply { this.endpoint = endpoint }
     fun setAPIKey(apiKey: String): ClientConfig = apply { this.apiKey = apiKey }
@@ -31,4 +33,5 @@ class ClientConfig private constructor() {
     fun setContextDataDeserializer(deserializer: ContextDataDeserializer): ClientConfig = apply { this.deserializer = deserializer }
     fun setContextEventSerializer(serializer: ContextEventSerializer): ClientConfig = apply { this.serializer = serializer }
     fun setExecutor(executor: Executor): ClientConfig = apply { this.executor = executor }
+    fun setApplicationVersion(version: String): ClientConfig = apply { this.applicationVersion = version }
 }

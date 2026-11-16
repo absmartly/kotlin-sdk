@@ -17,6 +17,8 @@ class ContextConfig private constructor() {
         private set
     var refreshInterval: Long = 0
         private set
+    var includeSystemAttributes: Boolean = false
+        private set
 
     fun setUnit(unitType: String, uid: String): ContextConfig = apply {
         if (units == null) units = mutableMapOf()
@@ -89,4 +91,5 @@ class ContextConfig private constructor() {
     fun setPublishDelay(delayMs: Long): ContextConfig = apply { this.publishDelay = delayMs }
 
     fun setRefreshInterval(intervalMs: Long): ContextConfig = apply { this.refreshInterval = intervalMs }
+    fun setIncludeSystemAttributes(include: Boolean): ContextConfig = apply { this.includeSystemAttributes = include }
 }

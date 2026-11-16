@@ -12,7 +12,22 @@ No version bump: the SDK has never been released (no tags, nothing published), s
 
 ### Added
 
+- Assignment rules (`Experiment.assignmentRules`): the first matching `assign` or `split` rule sets the variant ahead of the audience, traffic and custom assignments, and is exposed with `Exposure.ruleOverride`. An object or array sent in place of the rules string is ignored rather than failing the context.
+- `semver_eq`, `semver_gt`, `semver_gte`, `semver_lt` and `semver_lte` JSON expression operators.
+- `ContextConfig.setIncludeSystemAttributes`: publishes `sdk_name` and `sdk_version` with every batch (off by default). `application` and `environment` are never published, and no `app_version` is added; a user-set `app_version` attribute is evaluated and published like any other.
+- `ClientConfig.setApplicationVersion` and `Client.applicationVersion`, `Client.agentVersion`, `Client.agent`. The version is sent in `X-Application-Version` when, after trimming, it is 1 to 18 digits; otherwise the header stays `"0"`.
+- A tagged-release workflow publishing to Maven Central, with sources and Javadoc JARs.
 - `Hashing.utf8Bytes` and `Hashing.base64UrlNoPadding`, the encoders used for unit hashing.
+
+### Changed
+
+- Audiences and assignment-rule conditions now always see the configured `application` and `environment` names (the same names the collector attaches to every exposure server-side). The values are overlaid by any user attribute of the same name, including one set after an assignment was cached (the cache is invalidated). Empty or unset names are left out. They are evaluation-only and are not published.
+
+  This changes assignment for running experiments. A unit whose experiment has Audience enforced and an `environment` or `application` condition currently gets variant 0, because the SDK never supplied those attributes, so a strict audience always mismatched. After upgrading, that unit is randomised normally. Those experiments are broken today; this fixes them, but the assignment they produce will change.
+
+  Who moves: units in strict `application`/`environment` audiences move from variant 0 to their randomised variant; units already exposed with `audienceMismatch` are exposed again.
+- `X-Agent` is now `absmartly-kotlin-sdk/<version>` (was `absmartly-kotlin-sdk`). The collector stores it in the export `agent` column, so filters on the exact old value stop matching.
+- Exposures carry `ruleOverride` (`false` unless an assignment rule chose the variant), like the JavaScript SDK.
 
 ### BREAKING
 

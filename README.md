@@ -332,6 +332,47 @@ context.setAttribute("user_agent", "Mozilla/5.0...")
 context.setAttribute("customer_age", "new_customer")
 ```
 
+The configured `application` and `environment` names are always available to audience filters and
+assignment-rule conditions, even when you set no attributes. A user attribute of the same name overrides
+the configured value, including one set after an assignment was cached. These values are added only to the
+local evaluation map; the collector already attaches them to every exposure server-side, so nothing extra
+is published.
+
+### System Attributes
+
+`ContextConfig.setIncludeSystemAttributes(true)` prepends `sdk_name` and `sdk_version` to the attributes of every
+publish. It is off by default, and neither is published when you set an attribute of the same name. It does not
+publish `application` or `environment`, and the SDK never adds `app_version`: to target app versions, set it yourself
+with `context.setAttribute("app_version", ...)`.
+
+```kotlin
+val clientConfig = ClientConfig.create()
+    // ...endpoint, API key, application, environment
+    .setApplicationVersion("2.4.1")
+
+val contextConfig = ContextConfig.create()
+    .setUnit("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")
+    .setIncludeSystemAttributes(true)
+```
+
+The `X-Application-Version` header carries the version (from `ClientConfig.setApplicationVersion`, trimmed) only when
+it is a whole number of up to 18 digits; otherwise it is `"0"`. The
+`X-Agent` header is `absmartly-kotlin-sdk/<version>` and is sent on both fetch and publish.
+
+### Assignment Rules
+
+An experiment can carry assignment rules, configured in the web console. The first matching rule assigns the unit,
+ahead of the audience, traffic allocation and custom assignments (an override still wins). An `assign` rule sets a
+fixed variant; a `split` rule randomises the unit over its own percentages with the experiment's seed. Rule-assigned
+exposures are flagged `ruleOverride` so they are excluded from analysis.
+
+Rule conditions are evaluated against the same attributes as audiences and support the `semver_eq`, `semver_gt`,
+`semver_gte`, `semver_lt` and `semver_lte` operators, so rules (and audiences) can target app versions:
+
+```kotlin
+context.setAttribute("app_version", "2.4.1")
+```
+
 ### Custom Assignments
 
 ```kotlin

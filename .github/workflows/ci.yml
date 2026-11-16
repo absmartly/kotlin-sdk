@@ -29,3 +29,7 @@ jobs:
 
       - name: Run tests
         run: ./gradlew test
+
+      # A non-default version, so an agent or sdk_version that is not generated from the build version fails.
+      - name: Run tests with a probe version
+        run: ./gradlew test --rerun-tasks -PversionName=9.8.7-probe

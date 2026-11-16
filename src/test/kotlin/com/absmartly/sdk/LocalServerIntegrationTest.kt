@@ -11,6 +11,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -27,6 +28,9 @@ class LocalServerIntegrationTest {
     private lateinit var server: HttpServer
     private var port = 0
     private val requests = Collections.synchronizedList(mutableListOf<RecordedRequest>())
+
+    @Volatile
+    private var contextResponse: String = """{"experiments":[]}"""
 
     @BeforeTest
     fun startServer() {
@@ -47,7 +51,7 @@ class LocalServerIntegrationTest {
             )
 
             val response = if (exchange.requestMethod == "GET") {
-                """{"experiments":[]}"""
+                contextResponse
             } else {
                 "{}"
             }.toByteArray()
@@ -135,5 +139,54 @@ class LocalServerIntegrationTest {
         assertTrue(node.get("goals").size() > 0)
         assertEquals("payment", node.get("goals").get(0).get("name").asText())
 
+    }
+
+    // Without system attributes, only the user-set attribute is published; the collector adds application and
+    // environment server-side.
+    @Test
+    fun matchesEnvironmentAudienceWithoutPublishingSystemAttributes() {
+        contextResponse = """
+            {"experiments":[{
+                "id":1,"name":"exp_environment","iteration":1,"unitType":"session_id",
+                "seedHi":3603515,"seedLo":233373850,"split":[0.5,0.5],
+                "trafficSeedHi":449867249,"trafficSeedLo":455443629,"trafficSplit":[0.0,1.0],
+                "fullOnVariant":1,"applications":[{"name":"website"}],
+                "variants":[{"name":"A","config":null},{"name":"B","config":null}],
+                "audienceStrict":true,
+                "audience":"{\"filter\":[{\"eq\":[{\"var\":\"environment\"},{\"value\":\"development\"}]},{\"eq\":[{\"var\":\"application\"},{\"value\":\"website\"}]}]}"
+            }]}
+        """.trimIndent()
+
+        val sdk = ABsmartly.builder()
+            .endpoint("http://127.0.0.1:$port")
+            .apiKey("test-api-key")
+            .application("website")
+            .environment("development")
+            .build()
+        this.sdk = sdk
+
+        val context = sdk.createContext(
+            ContextConfig.create().setUnit("session_id", "e791e240fcd3df7d238cfc285f475e8152fcc0ec")
+        )
+        context.waitUntilReady()
+
+        context.setAttribute("user_type", "vip")
+        assertEquals(1, context.getTreatment("exp_environment"))
+        context.publish().get()
+
+        val put = requests.firstOrNull { it.method == "PUT" }
+        assertNotNull(put, "expected a PUT /context")
+
+        val mapper = ObjectMapper()
+        val node: JsonNode = mapper.readTree(put.body)
+
+        val exposures = node.get("exposures")
+        assertTrue(exposures.isArray && exposures.size() == 1)
+        assertEquals("exp_environment", exposures.get(0).get("name").asText())
+        assertEquals(1, exposures.get(0).get("variant").asInt())
+        assertFalse(exposures.get(0).get("audienceMismatch").asBoolean())
+
+        val attributeNames = node.get("attributes").map { it.get("name").asText() }
+        assertEquals(listOf("user_type"), attributeNames)
     }
 }
