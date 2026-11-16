@@ -385,6 +385,45 @@ class AssignmentRulesTest {
         assertEquals(afterFirst + 1, probe.reads)
     }
 
+    // Runs onFirstRead on its first lookup, i.e. while an assignment is being evaluated.
+    private class ReassigningMap(private val onFirstRead: () -> kotlin.Unit) : AbstractMap<String, Any?>() {
+        private var fired = false
+        override val entries: Set<Map.Entry<String, Any?>> get() = mapOf("tier" to "gold").entries
+        override fun get(key: String): Any? {
+            if (!fired) { fired = true; onFirstRead() }
+            return if (key == "tier") "gold" else null
+        }
+    }
+
+    private val goldRule = rules("""{"type":"assign","variant":0,"conditions":{"eq":[{"var":"probe/tier"},{"value":"gold"}]}}""")
+
+    @Test
+    fun attributeSetDuringEvaluationIsSeenAsNewer() {
+        lateinit var ctx: Context
+        val probe = ReassigningMap { ctx.setAttribute("probe", mapOf("tier" to "silver")) }
+        ctx = context(experiment(goldRule)) { it.setAttribute("probe", probe) }
+        val normal = context(experiment(null)).peekTreatment("exp_rules")
+        assertNotEquals(0, normal)
+
+        assertEquals(0, ctx.peekTreatment("exp_rules"))
+        assertEquals(normal, ctx.peekTreatment("exp_rules"))
+    }
+
+    @Test
+    fun attributeSetDuringRevalidationIsSeenAsNewer() {
+        lateinit var ctx: Context
+        val probe = ReassigningMap { ctx.setAttribute("probe", mapOf("tier" to "silver")) }
+        ctx = context(experiment(goldRule))
+        ctx.setAttribute("probe", mapOf("tier" to "gold"))
+        val normal = context(experiment(null)).peekTreatment("exp_rules")
+        assertNotEquals(0, normal)
+
+        assertEquals(0, ctx.peekTreatment("exp_rules"))
+        ctx.setAttribute("probe", probe)
+        assertEquals(0, ctx.peekTreatment("exp_rules"))
+        assertEquals(normal, ctx.peekTreatment("exp_rules"))
+    }
+
     @Test
     fun semverConditionsSelectRules() {
         val json = rules("""{"type":"assign","variant":1,"conditions":{"semver_gte":[{"var":"app_version"},{"value":"2.4.0"}]}}""")
