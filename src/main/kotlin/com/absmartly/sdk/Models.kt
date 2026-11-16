@@ -33,11 +33,13 @@ class Experiment(
     @JsonProperty("variants") var variants: List<ExperimentVariant> = emptyList(),
     @JsonProperty("audienceStrict") var audienceStrict: Boolean = false,
     @JsonProperty("audience") var audience: String? = null,
-    @JsonProperty("customFieldValues") var customFieldValues: List<CustomFieldValue>? = null,
+    @JsonProperty("customFieldValues") var customFieldValues: List<CustomFieldValue>? = null
+) {
+    // A body property, not a constructor parameter, so the constructor keeps its pre-rules JVM signature.
     @JsonProperty("assignmentRules")
     @JsonDeserialize(using = AssignmentRulesDeserializer::class)
     var assignmentRules: String? = null
-)
+}
 
 // assignmentRules is a JSON string. An object or array sent in its place is ignored (null) instead of failing the
 // whole context, so only that experiment's rules are skipped.
@@ -86,9 +88,11 @@ class Exposure(
     var overridden: Boolean = false,
     var fullOn: Boolean = false,
     var custom: Boolean = false,
-    var audienceMismatch: Boolean = false,
+    var audienceMismatch: Boolean = false
+) {
+    // A body property, not a constructor parameter, so the constructor keeps its pre-rules JVM signature.
     var ruleOverride: Boolean = false
-)
+}
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)

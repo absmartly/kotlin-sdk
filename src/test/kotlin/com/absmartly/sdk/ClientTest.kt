@@ -155,6 +155,10 @@ class ClientTest {
         }
         assertEquals("0", header(null))
         assertEquals("42", header("42"))
+        // Trimmed before validation, like the Java SDK.
+        assertEquals("1004", header(" 1004 "))
+        assertEquals("0", header(" "))
+        assertEquals("0", header("1 004"))
         assertEquals("0", header("2.4.1"))
         assertEquals("0", header("-5"))
         assertEquals("0", header("+5"))

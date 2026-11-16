@@ -88,8 +88,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
             eventLogger = contextEventLogger,
             scheduler = scheduler,
             application = client?.application,
-            environment = client?.environment,
-            applicationVersion = client?.applicationVersion
+            environment = client?.environment
         )
     }
 
@@ -103,8 +102,7 @@ class ABsmartly private constructor(config: ABSmartlyConfig) : Closeable {
             eventLogger = contextEventLogger,
             scheduler = scheduler,
             application = client?.application,
-            environment = client?.environment,
-            applicationVersion = client?.applicationVersion
+            environment = client?.environment
         )
     }
 

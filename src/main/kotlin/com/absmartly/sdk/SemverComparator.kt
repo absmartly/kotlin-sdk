@@ -1,8 +1,5 @@
 package com.absmartly.sdk
 
-import java.math.BigDecimal
-import java.math.RoundingMode
-
 internal object SemverComparator {
     fun compare(left: Any?, right: Any?): Int? = compare(stringConvert(left), stringConvert(right))
 
@@ -41,7 +38,8 @@ internal object SemverComparator {
     private fun stringConvert(value: Any?): String? = when (value) {
         is String -> value
         is Boolean -> value.toString()
-        is Number -> try { BigDecimal(value.toString()).setScale(15, RoundingMode.HALF_UP).stripTrailingZeros().toPlainString() } catch (_: Exception) { null }
+        // The JavaScript conversion, so 1e21 and above become "1e+21" as in the other SDKs.
+        is Number -> JsonExpr.numberToString(value)
         else -> null
     }
     private fun compareIdentifier(a: String, b: String): Int {

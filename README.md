@@ -340,10 +340,10 @@ is published.
 
 ### System Attributes
 
-`ContextConfig.setIncludeSystemAttributes(true)` also makes `app_version` (from `ClientConfig.setApplicationVersion`)
-available to audiences and rule conditions, and prepends `sdk_name`, `sdk_version`, `application`, `environment` and
-`app_version` to the attributes of every publish. It is off by default. `app_version` is left out when no version is
-set or it is `"0"`, and a system attribute is not published when you set an attribute of the same name.
+`ContextConfig.setIncludeSystemAttributes(true)` prepends `sdk_name` and `sdk_version` to the attributes of every
+publish. It is off by default, and neither is published when you set an attribute of the same name. It does not
+publish `application` or `environment`, and the SDK never adds `app_version`: to target app versions, set it yourself
+with `context.setAttribute("app_version", ...)`.
 
 ```kotlin
 val clientConfig = ClientConfig.create()
@@ -355,7 +355,8 @@ val contextConfig = ContextConfig.create()
     .setIncludeSystemAttributes(true)
 ```
 
-The `X-Application-Version` header carries the version only when it is a whole number; otherwise it is `"0"`. The
+The `X-Application-Version` header carries the version (from `ClientConfig.setApplicationVersion`, trimmed) only when
+it is a whole number of up to 18 digits; otherwise it is `"0"`. The
 `X-Agent` header is `absmartly-kotlin-sdk/<version>` and is sent on both fetch and publish.
 
 ### Assignment Rules

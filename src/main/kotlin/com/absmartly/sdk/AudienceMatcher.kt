@@ -26,14 +26,17 @@ internal class AudienceMatcher {
         for (entry in rules) {
             val rule = entry as? Map<*, *> ?: continue
             val action = when (rule["type"]) {
+                // Any integral number is a valid assign action, like JavaScript's Number.isInteger; one outside the
+                // int range becomes -1, which the caller's variant bounds check rejects.
                 "assign" -> (rule["variant"] as? Number)?.toDouble()
-                    ?.takeIf { it.isFinite() && it == kotlin.math.floor(it) && it <= Int.MAX_VALUE && it >= Int.MIN_VALUE }
-                    ?.let { RuleAction(it.toInt(), null) }
+                    ?.takeIf { it.isFinite() && it == kotlin.math.floor(it) }
+                    ?.let { RuleAction(if (it <= Int.MAX_VALUE && it >= Int.MIN_VALUE) it.toInt() else -1, null) }
                 "split" -> parseSplit(rule["percentages"] as? String)
                 else -> null
             } ?: continue
             val envs = rule["environments"]
-            if (envs != null && (envs !is List<*> || (envs.isNotEmpty() && !envs.contains(environment)))) continue
+            // Only a configured name can be in a non-empty scope, so a null member never matches a missing one.
+            if (envs != null && (envs !is List<*> || (envs.isNotEmpty() && (environment == null || !envs.contains(environment))))) continue
             // Like the JavaScript and Java SDKs, conditions must be an object; anything else skips the rule.
             val conditions = rule["conditions"] ?: return action
             if (conditions !is Map<*, *>) continue
@@ -114,7 +117,7 @@ internal class AudienceMatcher {
 // compare() converts the right operand to the left operand's type.
 internal object JsonExpr {
     // JS: x.toFixed(15).replace(/\.?0{0,15}$/, ""); toFixed falls back to String(x) for |x| >= 1e21.
-    private fun numberToString(n: Number): String {
+    internal fun numberToString(n: Number): String {
         val d = n.toDouble()
         if (d.isNaN()) return "NaN"
         if (d.isInfinite()) return if (d > 0) "Infinity" else "-Infinity"

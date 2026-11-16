@@ -9,8 +9,8 @@ import kotlin.test.assertTrue
 
 /**
  * The configured application and environment names are always available to audience filters and rule conditions,
- * with user-set attributes overriding them. ContextConfig.setIncludeSystemAttributes additionally exposes
- * app_version and publishes the system attributes.
+ * with user-set attributes overriding them. They are never published, and app_version is never injected.
+ * ContextConfig.setIncludeSystemAttributes only publishes sdk_name and sdk_version.
  */
 class ContextSystemAttributesTest {
 
@@ -162,7 +162,6 @@ class ContextSystemAttributesTest {
     private fun publishingContext(
         include: Boolean,
         publisher: ContextPublisher,
-        applicationVersion: String? = "2.4.1",
         configure: (ContextConfig) -> kotlin.Unit = {}
     ): Context {
         val config = ContextConfig.create().setPublishDelay(-1).setUnit("session_id", units.getValue("session_id"))
@@ -176,8 +175,7 @@ class ContextSystemAttributesTest {
             eventLogger = null,
             scheduler = null,
             application = "website",
-            environment = "production",
-            applicationVersion = applicationVersion
+            environment = "production"
         ).waitUntilReady()
     }
 
@@ -185,31 +183,57 @@ class ContextSystemAttributesTest {
     fun systemAttributesAreOffByDefault() {
         val publisher = CapturingPublisher()
         val context = publishingContext(include = false, publisher = publisher)
-        assertFalse(context.buildEvaluationAttributesMap().containsKey("app_version"))
-        assertEquals(0, context.getTreatment("exp_system"))
+        context.getTreatment("exp_system")
         context.publish().join()
         assertNull(publisher.events.single().attributes)
     }
 
+    // The configured application version is never an evaluation attribute, with or without the flag.
     @Test
-    fun includedSystemAttributesAreEvaluatedAndPublishedFirst() {
+    fun appVersionIsNeverInjected() {
+        for (include in listOf(false, true)) {
+            val context = publishingContext(include = include, publisher = CapturingPublisher())
+            assertFalse(context.buildEvaluationAttributesMap().containsKey("app_version"))
+            assertEquals(0, context.peekTreatment("exp_system"))
+        }
+    }
+
+    // A user-set app_version is still evaluated and published like any other attribute.
+    @Test
+    fun userSetAppVersionIsEvaluatedAndPublished() {
+        val publisher = CapturingPublisher()
+        val context = publishingContext(include = true, publisher = publisher) { it.setAttribute("app_version", "2.4.1") }
+        assertEquals(1, context.getTreatment("exp_system"))
+        context.publish().join()
+        assertEquals(listOf("sdk_name", "sdk_version", "app_version"), publisher.events.single().attributes!!.map { it.name })
+    }
+
+    @Test
+    fun includedSystemAttributesAreOnlySdkNameAndVersionPublishedFirst() {
         val publisher = CapturingPublisher()
         val context = publishingContext(include = true, publisher = publisher)
-        assertEquals("2.4.1", context.buildEvaluationAttributesMap()["app_version"])
-        assertEquals(1, context.getTreatment("exp_system"))
+        context.getTreatment("exp_system")
         context.setAttribute("user", "u1")
         context.publish().join()
 
         val attrs = publisher.events.single().attributes!!
-        assertEquals(
-            listOf("sdk_name", "sdk_version", "application", "environment", "app_version", "user"),
-            attrs.map { it.name }
-        )
+        assertEquals(listOf("sdk_name", "sdk_version", "user"), attrs.map { it.name })
         assertEquals(SdkVersion.NAME, attrs[0].value)
         assertEquals(SdkVersion.VERSION, attrs[1].value)
-        assertEquals("website", attrs[2].value)
-        assertEquals("production", attrs[3].value)
-        assertEquals("2.4.1", attrs[4].value)
+    }
+
+    // application and environment are evaluation-only, even with the flag on.
+    @Test
+    fun applicationAndEnvironmentAreNotPublished() {
+        val publisher = CapturingPublisher()
+        val context = publishingContext(include = true, publisher = publisher)
+        assertEquals("website", context.buildEvaluationAttributesMap()["application"])
+        assertEquals("production", context.buildEvaluationAttributesMap()["environment"])
+        context.track("goal", null)
+        context.publish().join()
+        val names = publisher.events.single().attributes!!.map { it.name }
+        assertFalse("application" in names)
+        assertFalse("environment" in names)
     }
 
     @Test
@@ -224,34 +248,23 @@ class ContextSystemAttributesTest {
         val event = publisher.events.single()
         val earliest = minOf(event.exposures!!.minOf { it.exposedAt }, event.goals!!.minOf { it.achievedAt })
         assertEquals(event.goals!!.single().achievedAt, earliest)
-        val systemNames = setOf("sdk_name", "sdk_version", "application", "environment", "app_version")
-        event.attributes!!.filter { it.name in systemNames }.forEach { assertEquals(earliest, it.setAt) }
+        val systemAttrs = event.attributes!!.filter { it.name == "sdk_name" || it.name == "sdk_version" }
+        assertEquals(2, systemAttrs.size)
+        systemAttrs.forEach { assertEquals(earliest, it.setAt) }
     }
 
     @Test
     fun userSetSystemNameIsNotDuplicated() {
         val publisher = CapturingPublisher()
-        val context = publishingContext(include = true, publisher = publisher) { it.setAttribute("environment", "qa") }
+        val context = publishingContext(include = true, publisher = publisher) { it.setAttribute("sdk_name", "custom") }
         context.track("goal", null)
         context.publish().join()
-        val environments = publisher.events.single().attributes!!.filter { it.name == "environment" }
-        assertEquals(listOf("qa"), environments.map { it.value })
+        val sdkNames = publisher.events.single().attributes!!.filter { it.name == "sdk_name" }
+        assertEquals(listOf("custom"), sdkNames.map { it.value })
     }
 
     @Test
-    fun unsetApplicationVersionIsLeftOut() {
-        for (version in listOf(null, "0", " ")) {
-            val publisher = CapturingPublisher()
-            val context = publishingContext(include = true, publisher = publisher, applicationVersion = version)
-            assertFalse(context.buildEvaluationAttributesMap().containsKey("app_version"))
-            context.track("goal", null)
-            context.publish().join()
-            assertFalse(publisher.events.single().attributes!!.any { it.name == "app_version" })
-        }
-    }
-
-    @Test
-    fun sdkCreateContextPassesTheClientApplicationVersion() {
+    fun sdkCreateContextPassesTheClientNamesButNotTheApplicationVersion() {
         val publisher = CapturingPublisher()
         val client = Client.create(
             ClientConfig.create().setEndpoint("https://test.example.com").setAPIKey("k")
@@ -270,7 +283,9 @@ class ContextSystemAttributesTest {
                 ContextConfig.create().setUnit("session_id", units.getValue("session_id")).setIncludeSystemAttributes(true),
                 ContextData(listOf(experiment(eqFilter("app_version", "2.4.1"))))
             ).waitUntilReady()
-            assertEquals(1, context.peekTreatment("exp_system"))
+            assertEquals(0, context.peekTreatment("exp_system"))
+            assertEquals("website", context.buildEvaluationAttributesMap()["application"])
+            assertEquals("production", context.buildEvaluationAttributesMap()["environment"])
         } finally {
             sdk.close()
         }

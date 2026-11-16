@@ -37,9 +37,8 @@ class AssignmentRulesTest {
         fullOnVariant = fullOnVariant,
         variants = List(variants) { ExperimentVariant("v$it", null) },
         audience = audience,
-        audienceStrict = audienceStrict,
-        assignmentRules = assignmentRules
-    )
+        audienceStrict = audienceStrict
+    ).also { it.assignmentRules = assignmentRules }
 
     private class Capture : ContextEventLogger {
         val exposures = mutableListOf<Exposure>()
@@ -171,15 +170,25 @@ class AssignmentRulesTest {
         assertEquals(normal, context(threeWaySplit).peekTreatment("exp_rules"))
     }
 
+    // Reference vector from the JavaScript SDK (VariantAssigner over hashUnit("user-N"), split 0.2/0.3/0.5). Rows
+    // with the experiment seed (3603515, 233373850) and the traffic seed (449867249, 455443629) differ, so hashing
+    // with the wrong seed, or not deterministically, fails.
     @Test
-    fun splitRuleIsDeterministicPerUnitAndUsesTheExperimentSeed() {
-        val exp = experiment(rules("""{"type":"split","percentages":"0/100"}"""))
-        assertEquals(1, context(exp).peekTreatment("exp_rules"))
-        val even = experiment(rules("""{"type":"split","percentages":"50/50"}"""))
-        val seen = (1..40).map { context(even, units = mapOf("session_id" to "user-$it")).peekTreatment("exp_rules") }.toSet()
-        assertEquals(setOf(0, 1), seen)
-        val again = (1..40).map { context(even, units = mapOf("session_id" to "user-$it")).peekTreatment("exp_rules") }.toSet()
-        assertEquals(seen, again)
+    fun splitRuleMatchesTheJavaScriptVectorWithTheExperimentSeed() {
+        val withExperimentSeed = listOf(2, 2, 1, 0, 2, 2, 1, 2, 2, 0, 2, 0, 2, 0, 1, 2, 2, 1, 2, 2, 2, 2, 2, 0)
+        val withTrafficSeed = listOf(0, 1, 2, 1, 2, 2, 1, 1, 2, 0, 0, 2, 1, 1, 1, 0, 2, 2, 0, 2, 1, 1, 2, 1)
+        assertNotEquals(withExperimentSeed, withTrafficSeed)
+        val exp = experiment(rules("""{"type":"split","percentages":"20/30/50"}"""), variants = 3)
+        val contexts = (1..24).map { context(exp, units = mapOf("session_id" to "user-$it")) }
+        repeat(2) {
+            assertEquals(withExperimentSeed, contexts.map { it.peekTreatment("exp_rules") })
+        }
+        assertEquals(withExperimentSeed, (1..24).map { context(exp, units = mapOf("session_id" to "user-$it")).peekTreatment("exp_rules") })
+    }
+
+    @Test
+    fun splitRuleAllOnOneVariant() {
+        assertEquals(1, context(experiment(rules("""{"type":"split","percentages":"0/100"}"""))).peekTreatment("exp_rules"))
     }
 
     @Test
@@ -230,6 +239,38 @@ class AssignmentRulesTest {
         assertEquals(1, context(exp, environment = "staging").peekTreatment("exp_rules"))
     }
 
+    // Rule scope is the configured environment: a user "environment" attribute feeds conditions, never the scope.
+    @Test
+    fun ruleScopeUsesTheConfiguredEnvironmentNotTheUserAttribute() {
+        val stagingCondition = """"conditions":{"eq":[{"var":"environment"},{"value":"staging"}]}"""
+        val productionScope = experiment(rules("""{"type":"assign","variant":0,"environments":["production"],$stagingCondition}"""))
+        val stagingScope = experiment(rules("""{"type":"assign","variant":0,"environments":["staging"],$stagingCondition}"""))
+        val normal = context(experiment(null)).peekTreatment("exp_rules")
+        assertNotEquals(0, normal)
+
+        val production = context(productionScope) { it.setAttribute("environment", "staging") }
+        assertEquals(0, production.peekTreatment("exp_rules"))
+        val staging = context(stagingScope) { it.setAttribute("environment", "staging") }
+        assertEquals(normal, staging.peekTreatment("exp_rules"))
+    }
+
+    // Without a configured environment a non-empty scope never matches, whatever its members are.
+    @Test
+    fun scopedRuleNeverMatchesWithoutAnEnvironment() {
+        assertNull(matcher.evaluateRules(rules("""{"type":"assign","variant":1,"environments":[null]}"""), null, emptyMap()))
+        assertNull(matcher.evaluateRules(rules("""{"type":"assign","variant":1,"environments":[1,true,{}]}"""), "1", emptyMap()))
+    }
+
+    // Like the JavaScript SDK, an integral variant outside the int range still matches its rule, which is then
+    // rejected by the bounds check instead of falling through to a later rule.
+    @Test
+    fun hugeIntegralAssignVariantStopsAtItsRule() {
+        val exp = experiment(rules("""{"type":"assign","variant":1e12}""", """{"type":"assign","variant":0}"""))
+        val normal = context(experiment(null)).peekTreatment("exp_rules")
+        assertNotEquals(0, normal)
+        assertEquals(normal, context(exp).peekTreatment("exp_rules"))
+    }
+
     @Test
     fun ruleWonExperimentServesVariables() {
         val exp = experiment(rules("""{"type":"assign","variant":1}""")).apply {
@@ -252,6 +293,85 @@ class AssignmentRulesTest {
         assertEquals(1, ctx.peekTreatment("exp_rules"))
         ctx.setData(ContextData(listOf(experiment(rules("""{"type":"assign","variant":0}""")))))
         assertEquals(0, ctx.peekTreatment("exp_rules"))
+    }
+
+    @Test
+    fun harmlessRuleRefreshKeepsTheExposedAssignment() {
+        val logger = Capture()
+        val ctx = context(experiment(rules("""{"name":"a","type":"assign","variant":1}""")), logger = logger)
+        assertEquals(1, ctx.getTreatment("exp_rules"))
+        // Only the rule name and an unknown key change; the rule still resolves to variant 1.
+        ctx.setData(ContextData(listOf(experiment(rules("""{"name":"b","future":true,"type":"assign","variant":1}""")))))
+        repeat(3) { assertEquals(1, ctx.getTreatment("exp_rules")) }
+        assertEquals(1, logger.exposures.size)
+        assertEquals(1, ctx.pendingCount)
+    }
+
+    @Test
+    fun harmlessRuleRefreshKeepsAnExposedNonRuleAssignment() {
+        val logger = Capture()
+        val never = """"conditions":{"eq":[{"var":"tier"},{"value":"gold"}]}"""
+        val ctx = context(experiment(rules("""{"type":"assign","variant":1,$never}"""), fullOnVariant = 0), logger = logger)
+        val normal = ctx.getTreatment("exp_rules")
+        ctx.setData(ContextData(listOf(experiment(rules("""{"name":"x","type":"assign","variant":1,$never}""")))))
+        assertEquals(normal, ctx.getTreatment("exp_rules"))
+        assertEquals(1, logger.exposures.size)
+    }
+
+    @Test
+    fun ruleRefreshChangingTheOutcomeReExposes() {
+        val logger = Capture()
+        val ctx = context(experiment(rules("""{"type":"assign","variant":1}""")), logger = logger)
+        assertEquals(1, ctx.getTreatment("exp_rules"))
+        ctx.setData(ContextData(listOf(experiment(rules("""{"type":"assign","variant":0}""")))))
+        assertEquals(0, ctx.getTreatment("exp_rules"))
+        ctx.setData(ContextData(listOf(experiment(null))))
+        val normal = ctx.getTreatment("exp_rules")
+        assertEquals(context(experiment(null)).peekTreatment("exp_rules"), normal)
+        assertEquals(3, logger.exposures.size)
+        assertFalse(logger.exposures.last().ruleOverride)
+    }
+
+    // A map attribute that counts lookups, so the number of rule-condition evaluations can be observed.
+    private class CountingMap(private val value: String) : AbstractMap<String, Any?>() {
+        var reads = 0
+        override val entries: Set<Map.Entry<String, Any?>> get() = mapOf("tier" to value).entries
+        override fun get(key: String): Any? { reads++; return if (key == "tier") value else null }
+    }
+
+    @Test
+    fun sameOutcomeRevalidationIsDoneOnce() {
+        val probe = CountingMap("gold")
+        val logger = Capture()
+        val condition = """"conditions":{"eq":[{"var":"probe/tier"},{"value":"gold"}]}"""
+        val ctx = context(experiment(rules("""{"type":"assign","variant":1,$condition}""")), logger = logger) {
+            it.setAttribute("probe", probe)
+        }
+        assertEquals(1, ctx.getTreatment("exp_rules"))
+        val afterFirst = probe.reads
+
+        ctx.setAttribute("unrelated", "x")
+        repeat(100) { assertEquals(1, ctx.peekTreatment("exp_rules")) }
+        assertEquals(afterFirst + 1, probe.reads)
+
+        ctx.setData(ContextData(listOf(experiment(rules("""{"name":"renamed","type":"assign","variant":1,$condition}""")))))
+        repeat(100) { assertEquals(1, ctx.getTreatment("exp_rules")) }
+        assertEquals(afterFirst + 2, probe.reads)
+        assertEquals(1, logger.exposures.size)
+    }
+
+    @Test
+    fun sameOutcomeAudienceRevalidationIsDoneOnce() {
+        val probe = CountingMap("gold")
+        val audience = """{"filter":[{"eq":[{"var":"probe/tier"},{"value":"gold"}]}]}"""
+        val ctx = context(experiment(rules("""{"type":"assign","variant":1,"environments":["staging"]}"""), audience = audience)) {
+            it.setAttribute("probe", probe)
+        }
+        val variant = ctx.peekTreatment("exp_rules")
+        val afterFirst = probe.reads
+        ctx.setAttribute("unrelated", "x")
+        repeat(100) { assertEquals(variant, ctx.peekTreatment("exp_rules")) }
+        assertEquals(afterFirst + 1, probe.reads)
     }
 
     @Test
@@ -278,7 +398,7 @@ class AssignmentRulesTest {
 
     @Test
     fun ruleOverrideSerializes() {
-        val json = String(DefaultContextEventSerializer().serialize(PublishEvent(exposures = listOf(Exposure(ruleOverride = true))))!!)
+        val json = String(DefaultContextEventSerializer().serialize(PublishEvent(exposures = listOf(Exposure().apply { ruleOverride = true })))!!)
         assertTrue(json.contains("\"ruleOverride\":true"), json)
         assertNotEquals(-1, json.indexOf("\"audienceMismatch\""))
     }

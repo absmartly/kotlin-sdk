@@ -60,4 +60,14 @@ class SemverComparatorTest {
         assertEquals(true, eval("semver_lte", "1.0.0", "1.0.0"))
         assertEquals(false, eval("semver_gt", "", "1.0.0"))
     }
+
+    // Numbers convert with the JavaScript stringConvert: 1e21 and above become "1e+21", where "+" starts build metadata.
+    @Test
+    fun largeNumbersConvertLikeJavaScript() {
+        assertEquals(0, SemverComparator.compare(1e21, "1e+21"))
+        assertEquals(0, SemverComparator.compare(1e21, "1e"))
+        assertEquals(0, SemverComparator.compare(1.5e22, "1.5e+99"))
+        assertEquals(0, SemverComparator.compare(2.5, "2.5.0"))
+        assertEquals(0, SemverComparator.compare(1e-7, "0.0000001"))
+    }
 }

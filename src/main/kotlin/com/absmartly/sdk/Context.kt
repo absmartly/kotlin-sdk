@@ -25,7 +25,6 @@ class Context private constructor(
     // to every exposure server-side, so audiences and rule conditions can target them. Null/empty means unset.
     private val applicationName: String?,
     private val environmentName: String?,
-    private val applicationVersion: String? = null,
     private val includeSystemAttributes: Boolean = false
 ) : Closeable {
 
@@ -34,9 +33,19 @@ class Context private constructor(
         units: Map<String, Any>,
         options: ContextOptions,
         eventLogger: ContextEventLogger? = null,
+        startReady: Boolean = true
+    ) : this(data, units, options, eventLogger, startReady, application = null, environment = null)
+
+    // A separate overload, so the constructor above keeps its JVM signature; application and environment have no
+    // defaults here so that calls without them still resolve to it.
+    constructor(
+        data: ContextData,
+        units: Map<String, Any>,
+        options: ContextOptions,
+        eventLogger: ContextEventLogger? = null,
         startReady: Boolean = true,
-        application: String? = null,
-        environment: String? = null
+        application: String?,
+        environment: String?
     ) : this(
         units = HashMap(units),
         eventLogger = eventLogger,
@@ -46,8 +55,7 @@ class Context private constructor(
         refreshInterval = options.refreshPeriod,
         scheduler = null,
         applicationName = application,
-        environmentName = environment,
-        applicationVersion = null
+        environmentName = environment
     ) {
         if (startReady) {
             setData(data)
@@ -69,8 +77,7 @@ class Context private constructor(
             eventLogger: ContextEventLogger?,
             scheduler: ScheduledExecutorService?,
             application: String? = null,
-            environment: String? = null,
-            applicationVersion: String? = null
+            environment: String? = null
         ): Context {
             val units = mutableMapOf<String, Any>()
 
@@ -86,7 +93,6 @@ class Context private constructor(
                 scheduler = scheduler,
                 applicationName = application,
                 environmentName = environment,
-                applicationVersion = applicationVersion,
                 includeSystemAttributes = config.includeSystemAttributes
             )
 
@@ -163,6 +169,8 @@ class Context private constructor(
     private var appliedRefreshSeq_ = 0L
 
     private val attrsSeq_ = AtomicInteger(0)
+    // The evaluation map for one attrsSeq_, so a single attribute change builds it once for every experiment.
+    @Volatile private var evaluationAttrs_: Pair<Int, Map<String, Any?>>? = null
     private val pendingCount_ = AtomicInteger(0)
 
     private val readyFuture_ = AtomicReference<CompletableFuture<Void>?>(null)
@@ -191,6 +199,7 @@ class Context private constructor(
         var audienceMismatch: Boolean = false
         var ruleOverride: Boolean = false
         var ruleMissingUnit: Boolean = false
+        // The rules the assignment was last validated against; a change triggers revalidation, not a rebuild.
         var assignmentRules: String? = null
         var variables: Map<String, Any?>? = null
         var attrsSeq: Int = 0
@@ -660,8 +669,7 @@ class Context private constructor(
                     return cached
                 }
             } else if (custom == null || cached.ruleOverride || custom == cached.variant) {
-                if (experimentMatches(experiment.data, cached) && audienceMatches(experiment.data, cached) &&
-                    ruleMatches(experiment, cached)) {
+                if (experimentMatches(experiment.data, cached) && attributesMatch(experiment, cached)) {
                     return cached
                 }
             }
@@ -685,6 +693,8 @@ class Context private constructor(
         } else {
             if (experiment != null) {
                 val unitType = experiment.data.unitType
+                // Read before evaluating, so an attribute set meanwhile is still seen as newer than this assignment.
+                val attrsSeq = attrsSeq_.get()
 
                 // A matching rule is an explicit, author-specified assignment, like an override: it wins over the
                 // audience, traffic and custom assignments, is not flagged assigned, and is exposed with ruleOverride.
@@ -750,7 +760,7 @@ class Context private constructor(
                 assignment.audienceStrict = experiment.data.audienceStrict
                 assignment.assignmentRules = experiment.data.assignmentRules
                 assignment.fullOnVariant = experiment.data.fullOnVariant
-                assignment.attrsSeq = attrsSeq_.get()
+                assignment.attrsSeq = attrsSeq
             }
         }
 
@@ -774,7 +784,7 @@ class Context private constructor(
             ?: return null
         val data = experiment.data
         val variantCount = data.variants.size
-        action.variant?.let { return if (it in 0 until variantCount) RuleResolution(it, false) else null }
+        action.variant?.let { return if (it in 0 until variantCount) RuleResolution(it.toInt(), false) else null }
         val split = action.split ?: return null
         if (split.size != variantCount) return null
         val unitType = data.unitType
@@ -783,13 +793,34 @@ class Context private constructor(
         return RuleResolution(getVariantAssigner(unitType, getUnitHash(unitType, uid)).assign(split, data.seedHi, data.seedLo), false)
     }
 
-    // Re-resolves the rules only after an attribute changed, and keeps the cached assignment while the outcome is the
-    // same so it is not exposed twice. An exposed split resolved without its unit stays pinned to that variant.
-    private fun ruleMatches(experiment: ContextExperiment, assignment: Assignment): Boolean {
-        if (experiment.rules == null || attrsSeq_.get() <= assignment.attrsSeq) return true
-        val rule = resolveRule(experiment, unitPinnedMissing = assignment.ruleMissingUnit && assignment.exposed.get())
-        val cachedVariant = if (assignment.ruleOverride) assignment.variant else null
-        return rule?.variant == cachedVariant && (rule?.missingUnit ?: false) == assignment.ruleMissingUnit
+    // Revalidates a cached assignment after an attribute or its experiment's rules changed. It stays valid, and is
+    // not exposed again, while the rule outcome and audience result are the same; then the validated rules and
+    // attribute sequence are recorded so later reads skip the work. An exposed split resolved without its unit stays
+    // pinned to that variant.
+    private fun attributesMatch(experiment: ContextExperiment, assignment: Assignment): Boolean {
+        val data = experiment.data
+        synchronized(assignment) {
+            val rulesChanged = data.assignmentRules != assignment.assignmentRules
+            val attrsSeq = attrsSeq_.get()
+            if (!rulesChanged && attrsSeq <= assignment.attrsSeq) return true
+
+            val rule = resolveRule(experiment, unitPinnedMissing = assignment.ruleMissingUnit && assignment.exposed.get())
+            val cachedVariant = if (assignment.ruleOverride) assignment.variant else null
+            if (rule?.variant != cachedVariant) return false
+
+            // A rule-won assignment never consulted the audience, so the audience cannot make it stale.
+            val audience = data.audience
+            if (!assignment.ruleOverride && !audience.isNullOrEmpty() && attrsSeq > assignment.attrsSeq) {
+                val match = audienceMatcher.evaluate(audience, buildEvaluationAttributesMap())
+                val newAudienceMismatch = if (match != null) !match.value else false
+                if (newAudienceMismatch != assignment.audienceMismatch) return false
+            }
+
+            if (rule != null) assignment.ruleMissingUnit = rule.missingUnit
+            assignment.assignmentRules = data.assignmentRules
+            assignment.attrsSeq = attrsSeq
+            return true
+        }
     }
 
     private fun getVariableAssignment(key: String): Assignment? {
@@ -816,23 +847,6 @@ class Context private constructor(
                 experiment.variants.map { it.config } == assignment.variantConfigs &&
                 experiment.audience == assignment.audience &&
                 experiment.audienceStrict == assignment.audienceStrict
-                && experiment.assignmentRules == assignment.assignmentRules
-    }
-
-    private fun audienceMatches(experiment: Experiment, assignment: Assignment): Boolean {
-        // A rule-won assignment never consulted the audience, so an audience change cannot make it stale.
-        if (assignment.ruleOverride) return true
-        if (experiment.audience != null && experiment.audience!!.isNotEmpty()) {
-            if (attrsSeq_.get() > assignment.attrsSeq) {
-                val attrs = buildEvaluationAttributesMap()
-                val match = audienceMatcher.evaluate(experiment.audience!!, attrs)
-                val newAudienceMismatch = if (match != null) !match.value else false
-                if (newAudienceMismatch != assignment.audienceMismatch) {
-                    return false
-                }
-            }
-        }
-        return true
     }
 
     private fun queueExposure(assignment: Assignment) {
@@ -853,9 +867,8 @@ class Context private constructor(
                 overridden = assignment.overridden,
                 fullOn = assignment.fullOn,
                 custom = assignment.custom,
-                audienceMismatch = assignment.audienceMismatch,
-                ruleOverride = assignment.ruleOverride
-            )
+                audienceMismatch = assignment.audienceMismatch
+            ).apply { ruleOverride = assignment.ruleOverride }
             exposures_.add(exposure)
             pendingCount_.incrementAndGet()
             publishedExposure = exposure
@@ -911,7 +924,8 @@ class Context private constructor(
             if (attributes_.isEmpty()) null else attributes_.toList()
         }
 
-        // The collector only applies attributes with setAt <= an event's time, so system attributes carry the
+        // sdk_name and sdk_version only; application and environment are evaluation-only, as the collector attaches
+        // them server-side. The collector only applies attributes with setAt <= an event's time, so these carry the
         // earliest event in the batch, and are left out when the user set the same name so theirs is kept.
         val publishedAt = System.currentTimeMillis()
         val publishedAttributes = if (!includeSystemAttributes) attrList else {
@@ -927,9 +941,6 @@ class Context private constructor(
                 }
                 addSystem("sdk_name", SdkVersion.NAME)
                 addSystem("sdk_version", SdkVersion.VERSION)
-                addSystem("application", applicationName?.ifEmpty { null })
-                addSystem("environment", environmentName?.ifEmpty { null })
-                if (isApplicationVersionSet(applicationVersion)) addSystem("app_version", applicationVersion)
                 addAll(attrList ?: emptyList())
             }
         }
@@ -994,19 +1005,19 @@ class Context private constructor(
     }
 
     // Variables for audiences and rule conditions. System values go first, so a user attribute of the same name wins.
+    // Built once per attribute sequence; the result is shared, so it must not be modified.
     internal fun buildEvaluationAttributesMap(): Map<String, Any?> {
+        val seq = attrsSeq_.get()
+        evaluationAttrs_?.let { if (it.first == seq) return it.second }
         val result = mutableMapOf<String, Any?>()
         putIfNotEmpty(result, "application", applicationName)
         putIfNotEmpty(result, "environment", environmentName)
-        // app_version is opt-in: unlike application and environment, the collector does not add it server-side.
-        if (includeSystemAttributes && isApplicationVersionSet(applicationVersion)) {
-            result["app_version"] = applicationVersion
-        }
         synchronized(attributes_) {
             for (attr in attributes_) {
                 result[attr.name] = attr.value
             }
         }
+        evaluationAttrs_ = seq to result
         return result
     }
 
@@ -1015,10 +1026,6 @@ class Context private constructor(
             map[key] = value
         }
     }
-
-    // "0" is what the client carries when no version is configured, so it counts as unset.
-    private fun isApplicationVersionSet(version: String?): Boolean =
-        !version.isNullOrBlank() && version != "0"
 
     private fun logEvent(type: ContextEventLogger.EventType, data: Any?) {
         try {
