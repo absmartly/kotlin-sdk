@@ -188,7 +188,6 @@ class ContextSystemAttributesTest {
         assertNull(publisher.events.single().attributes)
     }
 
-    // The configured application version is never an evaluation attribute, with or without the flag.
     @Test
     fun appVersionIsNeverInjected() {
         for (include in listOf(false, true)) {
@@ -198,7 +197,6 @@ class ContextSystemAttributesTest {
         }
     }
 
-    // A user-set app_version is still evaluated and published like any other attribute.
     @Test
     fun userSetAppVersionIsEvaluatedAndPublished() {
         val publisher = CapturingPublisher()
@@ -222,7 +220,6 @@ class ContextSystemAttributesTest {
         assertEquals(SdkVersion.VERSION, attrs[1].value)
     }
 
-    // application and environment are evaluation-only, even with the flag on.
     @Test
     fun applicationAndEnvironmentAreNotPublished() {
         val publisher = CapturingPublisher()

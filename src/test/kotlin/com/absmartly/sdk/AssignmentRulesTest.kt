@@ -109,7 +109,6 @@ class AssignmentRulesTest {
         assertNull(matcher.evaluateRules("""{"rules":"nope"}""", "production", emptyMap()))
     }
 
-    // A map attribute whose lookup throws, so its rule's condition fails to evaluate.
     private class ThrowingMap : AbstractMap<String, Any?>() {
         override val entries: Set<Map.Entry<String, Any?>> get() = emptySet()
         override fun get(key: String): Any? = throw IllegalStateException("boom")
@@ -269,7 +268,6 @@ class AssignmentRulesTest {
         assertEquals(normal, staging.peekTreatment("exp_rules"))
     }
 
-    // Without a configured environment a non-empty scope never matches, whatever its members are.
     @Test
     fun scopedRuleNeverMatchesWithoutAnEnvironment() {
         assertNull(matcher.evaluateRules(rules("""{"type":"assign","variant":1,"environments":[null]}"""), null, emptyMap()))
@@ -315,7 +313,6 @@ class AssignmentRulesTest {
         val logger = Capture()
         val ctx = context(experiment(rules("""{"name":"a","type":"assign","variant":1}""")), logger = logger)
         assertEquals(1, ctx.getTreatment("exp_rules"))
-        // Only the rule name and an unknown key change; the rule still resolves to variant 1.
         ctx.setData(ContextData(listOf(experiment(rules("""{"name":"b","future":true,"type":"assign","variant":1}""")))))
         repeat(3) { assertEquals(1, ctx.getTreatment("exp_rules")) }
         assertEquals(1, logger.exposures.size)
@@ -347,7 +344,6 @@ class AssignmentRulesTest {
         assertFalse(logger.exposures.last().ruleOverride)
     }
 
-    // A map attribute that counts lookups, so the number of rule-condition evaluations can be observed.
     private class CountingMap(private val value: String) : AbstractMap<String, Any?>() {
         var reads = 0
         override val entries: Set<Map.Entry<String, Any?>> get() = mapOf("tier" to value).entries

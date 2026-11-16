@@ -169,7 +169,6 @@ class Context private constructor(
     private var appliedRefreshSeq_ = 0L
 
     private val attrsSeq_ = AtomicInteger(0)
-    // The evaluation map for one attrsSeq_, so a single attribute change builds it once for every experiment.
     @Volatile private var evaluationAttrs_: Pair<Int, Map<String, Any?>>? = null
     private val pendingCount_ = AtomicInteger(0)
 
@@ -199,7 +198,6 @@ class Context private constructor(
         var audienceMismatch: Boolean = false
         var ruleOverride: Boolean = false
         var ruleMissingUnit: Boolean = false
-        // The rules the assignment was last validated against; a change triggers revalidation, not a rebuild.
         @Volatile var assignmentRules: String? = null
         var variables: Map<String, Any?>? = null
         @Volatile var attrsSeq: Int = 0
@@ -784,7 +782,7 @@ class Context private constructor(
             ?: return null
         val data = experiment.data
         val variantCount = data.variants.size
-        action.variant?.let { return if (it in 0 until variantCount) RuleResolution(it.toInt(), false) else null }
+        action.variant?.let { return if (it in 0 until variantCount) RuleResolution(it, false) else null }
         val split = action.split ?: return null
         if (split.size != variantCount) return null
         val unitType = data.unitType
@@ -799,7 +797,6 @@ class Context private constructor(
     // pinned to that variant.
     private fun attributesMatch(experiment: ContextExperiment, assignment: Assignment): Boolean {
         val data = experiment.data
-        // Lock-free for the common case: nothing changed since the last validation.
         if (data.assignmentRules == assignment.assignmentRules && attrsSeq_.get() <= assignment.attrsSeq) return true
         synchronized(assignment) {
             val rulesChanged = data.assignmentRules != assignment.assignmentRules
