@@ -385,6 +385,19 @@ class AssignmentRulesTest {
         assertEquals(afterFirst + 1, probe.reads)
     }
 
+    @Test
+    fun firstEvaluationIsNotRepeated() {
+        val probe = CountingMap("gold")
+        val ctx = context(experiment(rules("""{"type":"assign","variant":1,"conditions":{"eq":[{"var":"probe/tier"},{"value":"gold"}]}}"""))) {
+            it.setAttribute("probe", probe)
+        }
+        assertEquals(1, ctx.peekTreatment("exp_rules"))
+        val afterFirst = probe.reads
+
+        repeat(100) { assertEquals(1, ctx.peekTreatment("exp_rules")) }
+        assertEquals(afterFirst, probe.reads)
+    }
+
     // Runs onFirstRead on its first lookup, i.e. while an assignment is being evaluated.
     private class ReassigningMap(private val onFirstRead: () -> kotlin.Unit) : AbstractMap<String, Any?>() {
         private var fired = false
