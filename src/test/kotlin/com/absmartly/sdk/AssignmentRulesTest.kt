@@ -386,6 +386,87 @@ class AssignmentRulesTest {
     }
 
     @Test
+    fun firstEvaluationIsNotRepeated() {
+        val probe = CountingMap("gold")
+        val ctx = context(experiment(rules("""{"type":"assign","variant":1,"conditions":{"eq":[{"var":"probe/tier"},{"value":"gold"}]}}"""))) {
+            it.setAttribute("probe", probe)
+        }
+        assertEquals(1, ctx.peekTreatment("exp_rules"))
+        val afterFirst = probe.reads
+
+        repeat(100) { assertEquals(1, ctx.peekTreatment("exp_rules")) }
+        assertEquals(afterFirst, probe.reads)
+    }
+
+    // Runs onFirstRead on its first lookup, i.e. while an assignment is being evaluated.
+    private class ReassigningMap(private val onFirstRead: () -> kotlin.Unit) : AbstractMap<String, Any?>() {
+        private var fired = false
+        override val entries: Set<Map.Entry<String, Any?>> get() = mapOf("tier" to "gold").entries
+        override fun get(key: String): Any? {
+            if (!fired) { fired = true; onFirstRead() }
+            return if (key == "tier") "gold" else null
+        }
+    }
+
+    private val goldRule = rules("""{"type":"assign","variant":0,"conditions":{"eq":[{"var":"probe/tier"},{"value":"gold"}]}}""")
+
+    @Test
+    fun attributeSetDuringEvaluationIsSeenAsNewer() {
+        lateinit var ctx: Context
+        val probe = ReassigningMap { ctx.setAttribute("probe", mapOf("tier" to "silver")) }
+        ctx = context(experiment(goldRule)) { it.setAttribute("probe", probe) }
+        val normal = context(experiment(null)).peekTreatment("exp_rules")
+        assertNotEquals(0, normal)
+
+        assertEquals(0, ctx.peekTreatment("exp_rules"))
+        assertEquals(normal, ctx.peekTreatment("exp_rules"))
+    }
+
+    @Test
+    fun attributeSetDuringRevalidationIsSeenAsNewer() {
+        lateinit var ctx: Context
+        val probe = ReassigningMap { ctx.setAttribute("probe", mapOf("tier" to "silver")) }
+        ctx = context(experiment(goldRule))
+        ctx.setAttribute("probe", mapOf("tier" to "gold"))
+        val normal = context(experiment(null)).peekTreatment("exp_rules")
+        assertNotEquals(0, normal)
+
+        assertEquals(0, ctx.peekTreatment("exp_rules"))
+        ctx.setAttribute("probe", probe)
+        assertEquals(0, ctx.peekTreatment("exp_rules"))
+        assertEquals(normal, ctx.peekTreatment("exp_rules"))
+    }
+
+    private val goldAudience = """{"filter":[{"eq":[{"var":"probe/tier"},{"value":"gold"}]}]}"""
+
+    @Test
+    fun attributeSetDuringAudienceEvaluationIsSeenAsNewer() {
+        lateinit var ctx: Context
+        val probe = ReassigningMap { ctx.setAttribute("probe", mapOf("tier" to "silver")) }
+        ctx = context(experiment(null, audience = goldAudience, audienceStrict = true)) { it.setAttribute("probe", probe) }
+        val normal = context(experiment(null)).peekTreatment("exp_rules")
+        assertNotEquals(0, normal)
+
+        assertEquals(normal, ctx.peekTreatment("exp_rules"))
+        assertEquals(0, ctx.peekTreatment("exp_rules"))
+    }
+
+    @Test
+    fun attributeSetDuringAudienceRevalidationIsSeenAsNewer() {
+        lateinit var ctx: Context
+        val probe = ReassigningMap { ctx.setAttribute("probe", mapOf("tier" to "silver")) }
+        ctx = context(experiment(null, audience = goldAudience, audienceStrict = true))
+        ctx.setAttribute("probe", mapOf("tier" to "gold"))
+        val normal = context(experiment(null)).peekTreatment("exp_rules")
+        assertNotEquals(0, normal)
+
+        assertEquals(normal, ctx.peekTreatment("exp_rules"))
+        ctx.setAttribute("probe", probe)
+        assertEquals(normal, ctx.peekTreatment("exp_rules"))
+        assertEquals(0, ctx.peekTreatment("exp_rules"))
+    }
+
+    @Test
     fun semverConditionsSelectRules() {
         val json = rules("""{"type":"assign","variant":1,"conditions":{"semver_gte":[{"var":"app_version"},{"value":"2.4.0"}]}}""")
         val exp = experiment(json)
